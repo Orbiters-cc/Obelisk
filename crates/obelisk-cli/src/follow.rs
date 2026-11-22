@@ -299,6 +299,7 @@ impl Play {
                 steps.push(PlayStep::Tell(Event::Running {
                     app_id,
                     pid: pid(&active.id),
+                    session_id: Some(active.id.clone()),
                 }));
             }
         }
@@ -379,10 +380,16 @@ impl Play {
                 steps.push(PlayStep::Tell(Event::Starting { app_id }));
             }
             if !self.running {
-                steps.push(PlayStep::Tell(Event::Running { app_id, pid: None }));
+                steps.push(PlayStep::Tell(Event::Running {
+                    app_id,
+                    pid: None,
+                    session_id: last.map(|last| last.id.clone()),
+                }));
             }
             steps.push(PlayStep::Tell(Event::Exited {
                 app_id,
+                session_id: last.map(|last| last.id.clone()),
+                frames: played.map(|played| played.frames),
                 exit_code: played.and_then(|played| played.exit_code),
                 exit_signal: played.and_then(|played| played.exit_signal),
                 seconds: played.map(|played| played.seconds),

@@ -337,7 +337,7 @@ fn a_launch_tells_starting_then_running_with_the_game_s_process_then_its_exit() 
     let running = active(session("supervised", GamePhase::Running, true));
     assert_eq!(
         lines(&follow.observe(&held(), &running, pid, now)),
-        [r#"{"event":"running","app_id":438100,"pid":4242}"#]
+        [r#"{"event":"running","app_id":438100,"pid":4242,"session_id":"supervised"}"#]
     );
     assert!(
         follow.observe(&held(), &running, pid, now).is_empty(),
@@ -361,7 +361,7 @@ fn a_launch_tells_starting_then_running_with_the_game_s_process_then_its_exit() 
     assert_eq!(
         lines(&follow.observe(&released, &finished, pid, now)),
         [
-            r#"{"event":"exited","app_id":438100,"exit_code":0,"exit_signal":null,"seconds":3600,"ended_by_request":false}"#,
+            r#"{"event":"exited","app_id":438100,"session_id":"supervised","frames":100,"exit_code":0,"exit_signal":null,"seconds":3600,"ended_by_request":false}"#,
             "end"
         ]
     );
@@ -381,8 +381,8 @@ fn a_game_that_ran_and_exited_between_two_looks_still_tells_its_whole_life() {
         lines(&follow.observe(&idle(), &finished, pid, Instant::now())),
         [
             r#"{"event":"starting","app_id":438100}"#,
-            r#"{"event":"running","app_id":438100,"pid":null}"#,
-            r#"{"event":"exited","app_id":438100,"exit_code":3,"exit_signal":null,"seconds":3600,"ended_by_request":false}"#,
+            r#"{"event":"running","app_id":438100,"pid":null,"session_id":"supervised"}"#,
+            r#"{"event":"exited","app_id":438100,"session_id":"supervised","frames":100,"exit_code":3,"exit_signal":null,"seconds":3600,"ended_by_request":false}"#,
             "end"
         ]
     );
@@ -602,7 +602,7 @@ fn a_session_that_fails_after_its_game_ran_tells_the_exit_then_the_failure() {
     assert_eq!(
         lines(&follow.observe(&failed, &last, pid, now)),
         [
-            r#"{"event":"exited","app_id":438100,"exit_code":null,"exit_signal":null,"seconds":null,"ended_by_request":false}"#,
+            r#"{"event":"exited","app_id":438100,"session_id":"supervised","frames":null,"exit_code":null,"exit_signal":null,"seconds":null,"ended_by_request":false}"#,
             "failed session_failed"
         ]
     );

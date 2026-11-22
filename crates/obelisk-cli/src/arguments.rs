@@ -20,7 +20,7 @@ Commands:
                                       Install or update the Windows build of a game
   steam play <app_id> [-- <args>...]  Start an installed game and follow it until it ends
   steam running                       List the live Game sessions
-  steam quit <app_id> [--force] [--wait <seconds>]
+  steam quit <app_id> [--session <id>] [--force] [--wait <seconds>]
                                       Ask a running game to end
   settings prereleases on|off         Take Voile's pre-releases too, or not
 
@@ -65,6 +65,8 @@ pub enum Command {
         force: bool,
         /// How long to wait for the game to end, in seconds.
         wait: Option<u64>,
+        /// Only the Game session with this ID is asked to end.
+        session: Option<String>,
     },
     Prereleases(bool),
 }
@@ -229,9 +231,13 @@ fn steam(words: &mut Words) -> Result<Command, Failure> {
         },
         "quit" => {
             let app_id = app_id(words.next(), "steam quit")?;
-            let (mut force, mut wait) = (false, None);
+            let (mut force, mut wait, mut session) = (false, None, None);
             loop {
                 match words.words.as_slice().first().map(String::as_str) {
+                    Some("--session") => {
+                        words.next();
+                        session = Some(words.value("--session")?);
+                    }
                     Some("--force") => {
                         words.next();
                         force = true;
@@ -250,6 +256,7 @@ fn steam(words: &mut Words) -> Result<Command, Failure> {
                 app_id,
                 force,
                 wait,
+                session,
             }
         }
         other => {
@@ -363,7 +370,8 @@ mod tests {
             Command::Quit {
                 app_id: 438100,
                 force: false,
-                wait: None
+                wait: None,
+                session: None
             }
         );
         assert_eq!(
@@ -371,7 +379,17 @@ mod tests {
             Command::Quit {
                 app_id: 438100,
                 force: true,
-                wait: Some(30)
+                wait: Some(30),
+                session: None
+            }
+        );
+        assert_eq!(
+            command_of(&["steam", "quit", "438100", "--session", "f2931045-90d3-4302-a8a9-94021747c54f", "--wait", "30"]),
+            Command::Quit {
+                app_id: 438100,
+                force: false,
+                wait: Some(30),
+                session: Some("f2931045-90d3-4302-a8a9-94021747c54f".into())
             }
         );
         assert_eq!(

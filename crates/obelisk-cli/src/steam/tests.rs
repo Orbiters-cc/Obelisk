@@ -208,7 +208,7 @@ fn a_launch_without_its_helpers_fails_before_it_reaches_steam() {
     );
     assert_eq!(run(steam.running()).unwrap_err().code, HELPERS_MISSING);
     assert_eq!(
-        run(steam.quit(438100, false, None)).unwrap_err().code,
+        run(steam.quit(438100, false, None, None)).unwrap_err().code,
         HELPERS_MISSING
     );
     assert!(out.events().is_empty());

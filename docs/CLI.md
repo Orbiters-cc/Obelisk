@@ -20,7 +20,7 @@ This file is the contract a program is written against. Tests in `crates/obelisk
 
 ## State of this build
 
-0.1.2 gives Windows games on Voile's Linux engine the keyboard layout selected on the Mac, for Voile `v26.3.0-27.beta1`: see [Keyboard layout](#keyboard-layout), which also tells what was tested. `status` tells it in `voile.keyboard_layout`. 0.1.1 is 0.1.0 signed with a Developer ID and sent to Apple's notary. It is a first build. `status`, `steam installed`, `settings prereleases`, the command line, every failure before Steam is reached, and `steam login --qr` up to its `challenge` event were run for real. A complete sign-in, `steam install`, `steam play`, `steam running` with a live session and `steam quit` were never run against Steam: their code follows the app's and is covered by tests that drive it with the engine's states, not by a launch.
+0.1.3 tells which Game session holds the game: `running` and `exited` carry its `session_id`, `exited` the frames the game presented, and `steam quit --session` asks only that session's game to end (`other_session` otherwise), so that a program which started a game never ends one somebody else started meanwhile in the same library. 0.1.2 gives Windows games on Voile's Linux engine the keyboard layout selected on the Mac, for Voile `v26.3.0-27.beta1`: see [Keyboard layout](#keyboard-layout), which also tells what was tested. `status` tells it in `voile.keyboard_layout`. 0.1.1 is 0.1.0 signed with a Developer ID and sent to Apple's notary. It is a first build. `status`, `steam installed`, `settings prereleases`, the command line, every failure before Steam is reached, and `steam login --qr` up to its `challenge` event were run for real. A complete sign-in and `steam install` ran through Orbiters - N4N0 on 2026-11-22. `steam play` with arguments after `--`, `steam running` with a live session, `steam quit --wait` and `steam quit --force` ran against Steam with VRChat that day (0.1.1): the arguments reached the game in order, a quit took 6 s, and a game whose graphics had hung ignored Quit for 60 s and ended only with `--force`. The fields and the option 0.1.3 adds are covered by tests that drive the engine's states.
 
 ## Invocation
 
@@ -126,11 +126,13 @@ It fails with `not_signed_in`, `helpers_missing`, `not_installed`, `already_runn
 
 Tells one [`session`](#session) event for the Game session that holds Steam in this library, if there is one, then [`done`](#done). It needs `obelisk-steam-host`, which tells whether the recorded processes still live.
 
-### `steam quit <app_id> [--force] [--wait <seconds>]`
+### `steam quit <app_id> [--session <id>] [--force] [--wait <seconds>]`
 
 Asks the running game to end, as the app's Quit does: it is asked to close its windows, and nothing is killed. A launch still preparing under its supervisor is cancelled. `--force` is the app's Force Quit: the game ends now, with whatever still runs for its installation, and its session still settles its Cloud saves.
 
 It tells [`quit_requested`](#quit_requested) once the supervisor took the request. With `--wait`, it then waits that many seconds for the Game session to end and tells [`exited`](#exited), or fails with `still_running`. A game may answer Quit with a question of its own and play on.
+
+With `--session`, only the game of that Game session (the `session_id` of its [`running`](#running) event) is asked to end: when another session of the app runs, it fails with `other_session` and nothing is asked.
 
 It fails with `not_running` when no game of that app runs.
 
@@ -256,12 +258,15 @@ Keeps whether Windows games run in Voile's pre-releases too, as the app's beta r
 | --- | --- | --- |
 | `app_id` | number | The game. |
 | `pid` | number or null | The process the supervisor started for the game, as its record names it. For a Windows game it is the engine's launcher, not a Windows process. Null when the record could not be read, or when the game exited before it was seen running. |
+| `session_id` | string or null | The Game session that holds the game, a UUID: the name of its record `<library>/SteamSessions/<session id>.v2.json`, and what `steam quit --session` takes. Null when the game exited before its session was seen. |
 
 ### `exited`
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `app_id` | number | The game. |
+| `session_id` | string or null | The Game session that held the game. Null when it is not known. |
+| `frames` | number or null | How many frames the game presented to the screen in all, as its Game session counted them: 0 for a game whose graphics never showed anything. Null when it is not known. |
 | `exit_code` | number or null | The game's exit code. Null when a signal ended it or when it is not known. |
 | `exit_signal` | number or null | The signal that ended it, if one did. |
 | `seconds` | number or null | How long it ran. |
@@ -341,6 +346,7 @@ An engine reason with a code of its own keeps it whatever the command was doing;
 | `steam_components_failed` | Valve's Steam components could not be downloaded, read or stored. |
 | `quit_failed` | The supervisor did not take the request to end the game. |
 | `still_running` | `steam quit --wait`: the game still runs after that long. |
+| `other_session` | `steam quit --session`: the game of the app runs in another Game session than the one named. Nothing was asked to end. |
 | `settings_failed` | The setting could not be kept in the library. |
 
 ## Keyboard layout

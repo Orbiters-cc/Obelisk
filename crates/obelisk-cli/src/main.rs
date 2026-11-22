@@ -85,7 +85,8 @@ async fn dispatch(
             app_id,
             force,
             wait,
-        } => steam.quit(app_id, force, wait).await,
+            session,
+        } => steam.quit(app_id, force, wait, session).await,
         Command::Prereleases(take) => prereleases(places, take).map(|event| out.emit(event)),
     }
 }

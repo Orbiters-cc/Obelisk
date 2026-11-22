@@ -41,6 +41,7 @@ pub const CODES: &[&str] = &[
     STEAM_COMPONENTS_FAILED,
     QUIT_FAILED,
     STILL_RUNNING,
+    OTHER_SESSION,
     SETTINGS_FAILED,
 ];
 
@@ -80,6 +81,7 @@ pub const VOILE_FAILED: &str = "voile_failed";
 pub const STEAM_COMPONENTS_FAILED: &str = "steam_components_failed";
 pub const QUIT_FAILED: &str = "quit_failed";
 pub const STILL_RUNNING: &str = "still_running";
+pub const OTHER_SESSION: &str = "other_session";
 pub const SETTINGS_FAILED: &str = "settings_failed";
 
 /// Why a command failed.

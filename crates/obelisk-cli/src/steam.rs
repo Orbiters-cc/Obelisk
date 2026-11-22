@@ -8,7 +8,7 @@ use crate::{
     failure::{
         ALREADY_RUNNING, ANOTHER_GAME_RUNNING, BUSY, Failure, GAME_RUNNING, GUARD_REJECTED,
         GUARD_UNSUPPORTED, INPUT_MISSING, INTERNAL, LOGIN_FAILED, NO_WINDOWS_BUILD, NOT_INSTALLED,
-        NOT_OWNED, NOT_RUNNING, QUIT_FAILED, SESSION_RECOVERY_FAILED, SIGN_IN_EXPIRED,
+        NOT_OWNED, NOT_RUNNING, OTHER_SESSION, QUIT_FAILED, SESSION_RECOVERY_FAILED, SIGN_IN_EXPIRED,
         STEAM_FAILED, STILL_RUNNING,
     },
     follow::{self, Install, InstallStep, Play, PlayStep},
@@ -589,7 +589,13 @@ impl Steam<'_> {
     /// `steam quit`: the app's Quit, which asks the game to close its
     /// windows and kills nothing, or with `force` its Force Quit; then, with
     /// `wait`, the game's exit within that many seconds.
-    pub async fn quit(&self, app_id: u32, force: bool, wait: Option<u64>) -> Result<(), Failure> {
+    pub async fn quit(
+        &self,
+        app_id: u32,
+        force: bool,
+        wait: Option<u64>,
+        session: Option<String>,
+    ) -> Result<(), Failure> {
         self.places.open_library()?;
         let (sessions, state) = self.sessions().await?;
         let playing = |state: &GameSessionsState| {
@@ -607,6 +613,14 @@ impl Steam<'_> {
                 format!("The game {app_id} does not run."),
             ));
         };
+        // A caller that names its own session never ends another one: a game
+        // started meanwhile by someone else is left alone.
+        if let Some(asked) = session.filter(|asked| *asked != id) {
+            return Err(Failure::new(
+                OTHER_SESSION,
+                format!("The game {app_id} runs in the Game session {id}, not {asked}: nothing was asked to end."),
+            ));
+        }
         let asked = match force {
             true => sessions.force_quit(id.clone()).await,
             false => sessions.quit(id.clone()).await,
@@ -640,6 +654,8 @@ impl Steam<'_> {
             .and_then(|last| last.played.as_ref());
         self.tell(Event::Exited {
             app_id,
+            session_id: Some(id.clone()),
+            frames: played.map(|played| played.frames),
             exit_code: played.and_then(|played| played.exit_code),
             exit_signal: played.and_then(|played| played.exit_signal),
             seconds: played.map(|played| played.seconds),

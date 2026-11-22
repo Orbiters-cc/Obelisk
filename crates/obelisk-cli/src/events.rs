@@ -150,9 +150,15 @@ pub enum Event {
     Running {
         app_id: u32,
         pid: Option<u32>,
+        /// The Game session that holds the game.
+        session_id: Option<String>,
     },
     Exited {
         app_id: u32,
+        /// The Game session that held the game.
+        session_id: Option<String>,
+        /// How many frames the game presented, as its session counted them.
+        frames: Option<u64>,
         exit_code: Option<i32>,
         exit_signal: Option<i32>,
         seconds: Option<u64>,
@@ -275,9 +281,13 @@ mod tests {
         let line = Event::Running {
             app_id: 438100,
             pid: Some(4242),
+            session_id: Some("f2931045-90d3-4302-a8a9-94021747c54f".into()),
         }
         .line();
-        assert_eq!(line, r#"{"event":"running","app_id":438100,"pid":4242}"#);
+        assert_eq!(
+            line,
+            r#"{"event":"running","app_id":438100,"pid":4242,"session_id":"f2931045-90d3-4302-a8a9-94021747c54f"}"#
+        );
         assert!(!line.contains('\n'));
         let progress = Event::Progress {
             app_id: 438100,
