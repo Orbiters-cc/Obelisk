@@ -1,27 +1,33 @@
-//! The Orbiters fork's engine files for the keyboard layout. Voile's Linux
-//! engine takes every Mac keyboard for a US one: its window server names a
-//! key by its place, and its Wine driver has no layout. Two files of ours,
-//! built from Voile's own sources plus the layout (`scripts/
-//! build-engine-patch.sh`, `engine-patch/manifest.json`), replace the
-//! release's own before a game starts on the engine: the window server then
-//! tells the layout selected on the Mac, and the driver gives the game its
-//! virtual keys and characters.
+//! The Orbiters fork's engine files. Voile's Linux engine takes every Mac
+//! keyboard for a US one: its window server names a key by its place, and its
+//! Wine driver has no layout. And Neptune's render server refused any one
+//! resource update over 64 MiB, which VRChat sends seconds after an avatar
+//! loads: the game's graphics went for good. Four files of ours, built from
+//! Voile's own sources plus our changes (`scripts/build-engine-patch.sh`,
+//! `engine-patch/manifest.json`), replace the release's own before a game
+//! starts on the engine: the window server then tells the layout selected on
+//! the Mac, the driver gives the game its virtual keys and characters, and
+//! the render servers (arm64 for DXMT, x86_64 for D3DMetal) take an update up
+//! to 1 GiB.
 //!
 //! They are built for one release and go over that release only, and only
 //! over the files it shipped, told by their SHA-256: any other release, a
 //! development runtime, or a file that is neither Voile's nor ours is left
-//! as it is, and its games run with a US keyboard as before. The window
-//! server and the driver each run with the other's original: a patch
-//! interrupted between its two files leaves an engine that starts, and the
-//! next launch completes it.
+//! as it is, and its games run as Voile ships them. Each file runs with the
+//! others' originals (the window server and the driver share their protocol
+//! with Voile's, the render server is a program of its own): a patch
+//! interrupted between its files leaves an engine that starts, and the next
+//! launch completes it.
 use serde::Deserialize;
 use std::{fs, io::Write, os::unix::fs::PermissionsExt, path::Path, sync::OnceLock};
 
 const MANIFEST: &str = include_str!("../../engine-patch/manifest.json");
 /// The manifest's files, in its order.
-const FILES: [&[u8]; 2] = [
+const FILES: [&[u8]; 4] = [
     include_bytes!("../../engine-patch/wsd"),
     include_bytes!("../../engine-patch/wineobelisk.so"),
+    include_bytes!("../../engine-patch/virgl_render_server"),
+    include_bytes!("../../engine-patch/virgl_render_server-x86_64"),
 ];
 
 #[derive(Deserialize)]
@@ -76,16 +82,18 @@ fn built_in() -> &'static Patch {
     })
 }
 
-/// Which keyboard the games of a Linux engine runtime get.
+/// Which keyboard the games of a Linux engine runtime get, and with it
+/// whether its render servers take updates over 64 MiB: one patch does both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Keyboard {
-    /// Our files are in place: the layout selected on the Mac.
+    /// Our files are in place: the layout selected on the Mac, updates up to
+    /// 1 GiB.
     Mac,
     /// The release is the one our files are for and still has some of its
     /// own: the next launch on the engine puts ours in place.
     Pending,
     /// Another release, or files that are neither the release's nor ours: a
-    /// US keyboard, whatever the Mac's layout.
+    /// US keyboard, whatever the Mac's layout, and Voile's render servers.
     Us,
 }
 
@@ -189,6 +197,8 @@ mod tests {
     const RELEASE: &str = "v1.0.0-1";
     const WSD: &str = "engine/wsd";
     const DRIVER: &str = "wine/lib/wine/x86_64-unix/wineobelisk.so";
+    const SERVER: &str = "graphics/libexec/virgl_render_server";
+    const SERVER_X86: &str = "graphics/x86_64/libexec/virgl_render_server";
 
     /// A patch whose originals are `voile's wsd` and `voile's driver`.
     fn patch() -> Patch {
@@ -203,6 +213,7 @@ mod tests {
             files: vec![
                 file(WSD, b"voile's wsd", b"our wsd"),
                 file(DRIVER, b"voile's driver", b"our driver"),
+                file(SERVER, b"voile's server", b"our server"),
             ],
         }
     }
@@ -214,6 +225,7 @@ mod tests {
         let linux = release.join("linux");
         fs::create_dir_all(linux.join("engine")).unwrap();
         fs::create_dir_all(linux.join("wine/lib/wine/x86_64-unix")).unwrap();
+        fs::create_dir_all(linux.join("graphics/libexec")).unwrap();
         fs::write(
             release.join("runtime.json"),
             format!(r#"{{"version":"{version}","contract":1}}"#),
@@ -222,6 +234,8 @@ mod tests {
         fs::write(linux.join(WSD), b"voile's wsd").unwrap();
         fs::set_permissions(linux.join(WSD), fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(linux.join(DRIVER), b"voile's driver").unwrap();
+        fs::write(linux.join(SERVER), b"voile's server").unwrap();
+        fs::set_permissions(linux.join(SERVER), fs::Permissions::from_mode(0o755)).unwrap();
         (root, linux)
     }
 
@@ -232,6 +246,8 @@ mod tests {
         assert_eq!(patch.files.len(), FILES.len());
         assert_eq!(patch.files[0].path, WSD);
         assert_eq!(patch.files[1].path, DRIVER);
+        assert_eq!(patch.files[2].path, SERVER);
+        assert_eq!(patch.files[3].path, SERVER_X86);
         for file in &patch.files {
             assert_eq!(sha(file.bytes), file.patched, "{}", file.path);
             assert_ne!(file.original, file.patched, "{}", file.path);
@@ -245,8 +261,11 @@ mod tests {
         assert_eq!(patch().apply(&linux), Keyboard::Mac);
         assert_eq!(fs::read(linux.join(WSD)).unwrap(), b"our wsd");
         assert_eq!(fs::read(linux.join(DRIVER)).unwrap(), b"our driver");
-        let mode = fs::metadata(linux.join(WSD)).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o755);
+        assert_eq!(fs::read(linux.join(SERVER)).unwrap(), b"our server");
+        for path in [WSD, SERVER] {
+            let mode = fs::metadata(linux.join(path)).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755, "{path}");
+        }
         // Nothing is left beside them.
         let left: Vec<_> = fs::read_dir(linux.join("engine"))
             .unwrap()
@@ -312,6 +331,41 @@ mod tests {
         fs::remove_file(root.path().join(RELEASE).join("runtime.json")).unwrap();
         assert_eq!(patch().apply(&linux), Keyboard::Us);
         assert_eq!(fs::read(linux.join(WSD)).unwrap(), b"voile's wsd");
+    }
+
+    #[test]
+    fn a_render_server_that_is_neither_voile_s_nor_ours_leaves_every_file_alone() {
+        let (_root, linux) = runtime(RELEASE);
+        fs::write(linux.join(SERVER), b"someone else's server").unwrap();
+        assert_eq!(patch().apply(&linux), Keyboard::Us);
+        assert_eq!(fs::read(linux.join(WSD)).unwrap(), b"voile's wsd");
+        assert_eq!(fs::read(linux.join(DRIVER)).unwrap(), b"voile's driver");
+        assert_eq!(fs::read(linux.join(SERVER)).unwrap(), b"someone else's server");
+    }
+
+    #[test]
+    fn a_runtime_patched_for_the_keyboard_only_gets_the_render_server_too() {
+        // What 0.1.2 and 0.1.3 left: our wsd and driver, Voile's render server.
+        let (_root, linux) = runtime(RELEASE);
+        fs::write(linux.join(WSD), b"our wsd").unwrap();
+        fs::write(linux.join(DRIVER), b"our driver").unwrap();
+        assert_eq!(patch().keyboard(&linux), Keyboard::Pending);
+        assert_eq!(patch().apply(&linux), Keyboard::Mac);
+        assert_eq!(fs::read(linux.join(SERVER)).unwrap(), b"our server");
+    }
+
+    /// The render servers built in are 64-bit Mach-O programs for arm64 and
+    /// x86_64, each naming the render server's own path as Voile's does.
+    #[test]
+    fn the_render_servers_built_in_are_for_their_architectures() {
+        let patch = built_in();
+        let needle = b"/libexec/virgl_render_server";
+        for (index, cpu) in [(2, 0x0100_000c_u32), (3, 0x0100_0007)] {
+            let file = &patch.files[index];
+            assert_eq!(file.bytes[..4], 0xfeed_facf_u32.to_le_bytes(), "{}", file.path);
+            assert_eq!(file.bytes[4..8], cpu.to_le_bytes(), "{}", file.path);
+            assert!(file.bytes.windows(needle.len()).any(|w| w == needle), "{}", file.path);
+        }
     }
 
     /// With `OBELISK_ENGINE_PATCH_RUNTIME` naming the Linux runtime of a
