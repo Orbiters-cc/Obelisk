@@ -19,7 +19,7 @@ This file is the contract a program is written against. Tests in `crates/obelisk
 
 ## State of this build
 
-0.1.0 is a first build. `status`, `steam installed`, `settings prereleases`, the command line, every failure before Steam is reached, and `steam login --qr` up to its `challenge` event were run for real. A complete sign-in, `steam install`, `steam play`, `steam running` with a live session and `steam quit` were never run against Steam: their code follows the app's and is covered by tests that drive it with the engine's states, not by a launch.
+0.1.1 is 0.1.0 signed with a Developer ID and sent to Apple's notary; the program is the same. It is a first build. `status`, `steam installed`, `settings prereleases`, the command line, every failure before Steam is reached, and `steam login --qr` up to its `challenge` event were run for real. A complete sign-in, `steam install`, `steam play`, `steam running` with a live session and `steam quit` were never run against Steam: their code follows the app's and is covered by tests that drive it with the engine's states, not by a launch.
 
 ## Invocation
 
@@ -402,7 +402,7 @@ Every program is signed with the identity `CLI_SIGN_IDENTITY` names, else the fi
 
 A Developer ID signature takes Apple's secure timestamp; an Apple Development one takes none. When the Keychain does not let `codesign` use the key within a minute, or no identity is there, the script says so on standard error and the archive holds the build unsigned. Keep the same identity across builds: the Keychain item that holds the Steam session belongs to the signature that saved it.
 
-The archive is not notarized. A program that downloads it should remove the quarantine attribute from the folder, or run it from a process that set none.
+With `CLI_NOTARY_PROFILE` naming a profile of `xcrun notarytool store-credentials`, and a Developer ID signature, the script sends the programs to Apple's notary before it archives them, and waits 20 minutes for the answer. No ticket can be stapled to bare programs: macOS asks Apple for it at their first check. Without it the archive is not notarized, and a program that downloads it should remove the quarantine attribute from the folder, or run it from a process that set none.
 
 ```sh
 cargo test -p obelisk-cli

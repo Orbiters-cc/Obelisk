@@ -128,13 +128,29 @@ fi
 
 DIST="$PROJECT_ROOT/build/dist"
 mkdir -p "$DIST"
+# With CLI_NOTARY_PROFILE (a profile of `xcrun notarytool store-credentials`) and a Developer ID signature, the
+# programs go to Apple's notary before they are archived. A ticket cannot be stapled to bare programs: macOS asks
+# Apple for it when it first checks them.
+if [[ -n "${CLI_NOTARY_PROFILE:-}" && "$SIGNED" == yes && "$TIMESTAMP" == --timestamp ]]; then
+    SUBMISSION="$DIST/$NAME-notary.zip"
+    rm -f "$SUBMISSION"
+    /usr/bin/ditto -c -k --keepParent "$STAGE" "$SUBMISSION"
+    # Apple can keep a new account's first submissions for hours: the archive is made all the same after 20 minutes,
+    # and Apple's answer, when it comes, counts for these very programs (`xcrun notarytool history`).
+    if xcrun notarytool submit --wait --timeout 20m --keychain-profile "$CLI_NOTARY_PROFILE" "$SUBMISSION" >&2; then
+        NOTARIZED=yes
+    else
+        echo "Apple's notary did not answer in time, or refused: see xcrun notarytool history." >&2
+    fi
+    rm -f "$SUBMISSION"
+fi
 ARCHIVE="$DIST/$NAME.tar.gz"
 COPYFILE_DISABLE=1 /usr/bin/tar -czf "$ARCHIVE" -C "$PROJECT_ROOT/build/cli" "$NAME"
 (cd "$DIST" && /usr/bin/shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
 echo "$ARCHIVE"
 if [[ "$SIGNED" == yes ]]; then
     echo "Signed with $(/usr/bin/codesign -dvv "$CLI" 2>&1 | sed -n 's/^Authority=//p' | head -1)," \
-        "team $(/usr/bin/codesign -dvv "$CLI" 2>&1 | sed -n 's/^TeamIdentifier=//p')."
+        "team $(/usr/bin/codesign -dvv "$CLI" 2>&1 | sed -n 's/^TeamIdentifier=//p')${NOTARIZED:+, notarized}."
 else
     echo "UNSIGNED: the archive holds the build as the linker left it. Its Keychain item and the Steam host need a signature." >&2
 fi
