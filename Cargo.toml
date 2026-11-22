@@ -2,6 +2,7 @@
 members = [
     "crates/obelisk-core",
     "crates/obelisk-bridge",
+    "crates/obelisk-cli",
     "crates/game-runtime",
     "crates/cloud-vault",
     "crates/storefronts/steam-kit",

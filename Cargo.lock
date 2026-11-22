@@ -1323,6 +1323,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "obelisk-cli"
+version = "0.1.0"
+dependencies = [
+ "game-runtime",
+ "obelisk-bridge",
+ "security-framework",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "obelisk-core"
 version = "0.1.0"
 dependencies = [
