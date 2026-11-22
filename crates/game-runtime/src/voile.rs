@@ -33,7 +33,7 @@ mod feed;
 
 use feed::Offered;
 pub(crate) use feed::refresh;
-pub use feed::take_prereleases;
+pub use feed::{take_prereleases, takes_prereleases};
 
 const RELEASE: &str = include_str!("../voile-release.json");
 /// Where install-dev.sh puts a locally built runtime.

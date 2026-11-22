@@ -27,6 +27,7 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 /// How one Windows installation runs from its next launch: its game's
@@ -174,6 +175,17 @@ pub(crate) fn engine(library: &Path, game: profile::Game<'_>, install: &Path) ->
         .engine
         .unwrap_or_else(|| profile::engine(game, install))
 }
+
+/// What this process adds to the command line of every game it launches,
+/// after the player's own arguments and without keeping it: a launcher that
+/// starts one game per process, such as `obelisk-cli`, names them once,
+/// before its launch. A later call changes nothing and returns false.
+pub fn add_arguments(arguments: Vec<String>) -> bool {
+    ADDED.set(arguments).is_ok()
+}
+
+/// What `add_arguments` was given.
+static ADDED: OnceLock<Vec<String>> = OnceLock::new();
 
 /// What starts `game` in the player's language, `locale` such as `it_IT`,
 /// when the game reads its language from its command line rather than from
@@ -489,14 +501,29 @@ pub struct View {
 
 impl View {
     /// The launch settings of `game`, whose profile is `profile`, with
-    /// `choices`, for a player whose locale is `locale`.
+    /// `choices`, for a player whose locale is `locale`, and with what this
+    /// process adds to its games' command lines.
     fn new(
         game: profile::Game<'_>,
         profile: &Profile,
         choices: Choices,
         locale: Option<&str>,
     ) -> Self {
+        let added = ADDED.get().map(Vec::as_slice).unwrap_or_default();
+        Self::with(game, profile, choices, locale, added)
+    }
+
+    /// `new`, with `added` after the player's arguments: they start the game
+    /// as the player's do, and `choices` keeps none of them.
+    fn with(
+        game: profile::Game<'_>,
+        profile: &Profile,
+        choices: Choices,
+        locale: Option<&str>,
+        added: &[String],
+    ) -> Self {
         let mut settings = choices.apply(profile);
+        settings.arguments.extend(added.iter().cloned());
         settings.locale = locale.map(str::to_owned);
         let language =
             locale.and_then(|locale| language_argument(game, &settings.arguments, locale));

@@ -117,7 +117,7 @@ fn releases(feed: &[u8]) -> Option<Vec<Offered>> {
 }
 
 /// Whether the player takes Voile's pre-releases in `root`.
-pub(super) fn takes_prereleases(root: &Path) -> bool {
+pub fn takes_prereleases(root: &Path) -> bool {
     root.join(PRERELEASES).is_file()
 }
 

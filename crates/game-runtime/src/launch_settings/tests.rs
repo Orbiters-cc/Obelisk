@@ -475,6 +475,33 @@ fn the_player_s_typed_arguments_are_split_outside_quotes() {
 }
 
 #[test]
+fn what_a_launcher_adds_starts_the_game_after_the_player_s_arguments_and_is_never_kept() {
+    let choices = Choices {
+        arguments: Some("-windowed".into()),
+        ..Choices::default()
+    };
+    let profile = profile::of(MINDSEYE, nowhere());
+    let added = ["--no-vr".to_owned(), "two words".to_owned()];
+
+    let view = View::with(MINDSEYE, &profile, choices.clone(), None, &added);
+
+    assert_eq!(
+        view.settings.arguments,
+        ["-windowed", "--no-vr", "two words"]
+    );
+    assert_eq!(view.choices, choices, "the choices kept name none of them");
+    let started = view.settings.started(
+        Path::new("/library/Games/game"),
+        &publisher("/library/Games/game/game.exe", &["-steam"]),
+    );
+    let last: Vec<_> = started.arguments.iter().rev().take(3).rev().collect();
+    assert_eq!(last, ["-windowed", "--no-vr", "two words"]);
+    assert_eq!(started.arguments[0], "-steam");
+    let alone = View::with(MINDSEYE, &profile, Choices::default(), None, &[]);
+    assert!(alone.settings.arguments.is_empty());
+}
+
+#[test]
 fn a_substitute_starts_with_the_storefront_s_then_the_profile_s_then_the_player_s_arguments() {
     let directory = tempfile::tempdir().unwrap();
     let library = directory.path();
