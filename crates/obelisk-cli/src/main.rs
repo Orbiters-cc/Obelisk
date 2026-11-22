@@ -105,6 +105,8 @@ fn status(places: &Places, store: &dyn CredentialStore) -> Event {
         keychain,
         voile: events::Voile {
             prereleases: game_runtime::voile::takes_prereleases(Path::new(&locations.voile)),
+            keyboard_layout: game_runtime::voile::keyboard(Path::new(&locations.voile))
+                .map(game_runtime::voile::engine_patch::Keyboard::name),
             installed: obelisk_bridge::installed_voile_release(locations),
         },
         helpers: places.helpers(),
@@ -154,6 +156,7 @@ mod tests {
         assert_eq!(told["keychain"], "ok");
         assert_eq!(told["voile"]["installed"], serde_json::Value::Null);
         assert_eq!(told["voile"]["prereleases"], false);
+        assert_eq!(told["voile"]["keyboard_layout"], serde_json::Value::Null);
         assert_eq!(told["helpers"]["found"], false);
         assert!(!line.contains("secret-refresh-token"));
         assert!(

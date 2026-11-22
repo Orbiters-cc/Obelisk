@@ -163,6 +163,10 @@ impl Adapter for LinuxEngine {
         if !installed(config) {
             return Err(Error::WineUnavailable);
         }
+        // The keyboard layout selected on the Mac, where the runtime is the
+        // release the Orbiters fork's engine files are for; any other runs
+        // as Voile shipped it.
+        crate::voile::engine_patch::apply(&config.runtime);
         let direct3d = DIRECT3D.map(|library| config.runtime.join("windows").join(library));
         let neptune = config.runtime.join(WINE_DLLS).join(NEPTUNE);
         if !direct3d.iter().chain([&neptune]).all(|file| file.is_file()) {

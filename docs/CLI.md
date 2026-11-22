@@ -13,13 +13,14 @@ This file is the contract a program is written against. Tests in `crates/obelisk
 - [Commands](#commands)
 - [Events](#events)
 - [Error codes](#error-codes)
+- [Keyboard layout](#keyboard-layout)
 - [Questions answered in the player's place](#questions-answered-in-the-players-place)
 - [What the app does and this program does not](#what-the-app-does-and-this-program-does-not)
 - [Building and signing](#building-and-signing)
 
 ## State of this build
 
-0.1.1 is 0.1.0 signed with a Developer ID and sent to Apple's notary; the program is the same. It is a first build. `status`, `steam installed`, `settings prereleases`, the command line, every failure before Steam is reached, and `steam login --qr` up to its `challenge` event were run for real. A complete sign-in, `steam install`, `steam play`, `steam running` with a live session and `steam quit` were never run against Steam: their code follows the app's and is covered by tests that drive it with the engine's states, not by a launch.
+0.1.2 gives Windows games on Voile's Linux engine the keyboard layout selected on the Mac, for Voile `v26.3.0-27.beta1`: see [Keyboard layout](#keyboard-layout), which also tells what was tested. `status` tells it in `voile.keyboard_layout`. 0.1.1 is 0.1.0 signed with a Developer ID and sent to Apple's notary. It is a first build. `status`, `steam installed`, `settings prereleases`, the command line, every failure before Steam is reached, and `steam login --qr` up to its `challenge` event were run for real. A complete sign-in, `steam install`, `steam play`, `steam running` with a live session and `steam quit` were never run against Steam: their code follows the app's and is covered by tests that drive it with the engine's states, not by a launch.
 
 ## Invocation
 
@@ -153,7 +154,7 @@ Keeps whether Windows games run in Voile's pre-releases too, as the app's beta r
 | `library` | string | The library directory. |
 | `account` | object or null | The signed-in account: `steam_id` (string) and `account_name` (string). Null when signed out, or when the Keychain did not answer. |
 | `keychain` | string | `ok`, or `unavailable` when the Keychain could not be read. |
-| `voile` | object | `installed` (string or null): the Voile release Windows games run in now, such as `v26.3.0-16`. `prereleases` (boolean): pre-releases are taken. |
+| `voile` | object | `installed` (string or null): the Voile release Windows games run in now, such as `v26.3.0-16`. `prereleases` (boolean): pre-releases are taken. `keyboard_layout` (string or null): the keyboard the games of the Linux engine get, see [Keyboard layout](#keyboard-layout): `mac` (the layout selected on the Mac), `pending` (the same, from the next launch on the engine), `us` (a US keyboard whatever the Mac's layout: this build has no engine files for the release in place). Null when no release with the Linux engine is installed. |
 | `helpers` | object | `directory` (string), `found` (boolean: every helper a launch needs is there), `missing` (array of file names), `rosetta_helper` (boolean: `Obelisk Rosetta.app` is beside the folder). |
 
 ### `challenge`
@@ -342,6 +343,23 @@ An engine reason with a code of its own keeps it whatever the command was doing;
 | `still_running` | `steam quit --wait`: the game still runs after that long. |
 | `settings_failed` | The setting could not be kept in the library. |
 
+## Keyboard layout
+
+Voile's Linux engine, which runs VRChat and the other games whose profile names it, takes every Mac keyboard for a US one: its window server (`wsd`) names a key by its place, and its Wine driver (`wineobelisk.drv`) has no keyboard layout, so on an AZERTY Mac the key that types "a" gave the game `VK_Q` and "q". Games on Rosetta's Wine are not concerned: CrossOver's Mac driver reads the layout itself.
+
+`obelisk-cli` carries two engine files of its own, inside the program: `wsd` and `wineobelisk.so`, built from Voile's sources plus the layout ([Orbiters-cc/voile-lkd](https://github.com/Orbiters-cc/voile-lkd) and [Orbiters-cc/voile-wine](https://github.com/Orbiters-cc/voile-wine), branch `orbiters`; the commits are in `crates/game-runtime/engine-patch/manifest.json`). As a game starts on the Linux engine, they replace the two files of the Voile release in the library, at `linux/engine/wsd` and `linux/wine/lib/wine/x86_64-unix/wineobelisk.so`. With them:
+
+- A key has the scan code of its place, and the virtual key a PC keyboard of the Mac's layout gives it: on a French layout the key right of Tab is `VK_A`, the digits row keeps `VK_1` to `VK_0`, and the punctuation keys have the virtual keys of Windows' French layout. Letters and digits are right in every layout; the `VK_OEM_*` keys follow the rules of Wine's Mac driver, checked against Windows' French and German layouts.
+- Typed text (`WM_CHAR`, `ToUnicodeEx`) is what the Mac's layout types, with Shift, Caps Lock as the Mac's layout defines it, and dead keys (`^` then `e` types "ê").
+- Where the layout types ASCII characters with Option, as French and German do for braces, the right Option key is AltGr, sent as left Control and right Alt as Windows sends it, and types those characters. The left Option key stays Alt. A layout that types all of ASCII without Option (US, Dvorak) keeps two Alt keys.
+- Picking another input source while the game runs changes the layout at once, and the game's window gets `WM_INPUTLANGCHANGE`.
+
+What they do not do: the left Option key types no Option character; `GetKeyboardLayout` and the layout's name still follow the Windows locale, not the Mac's input source; a key that types more than one UTF-16 unit types nothing; a dead key pressed after another dead key types both accents instead of chaining; an input method (Japanese, Chinese) gives its Latin layout, not its composition.
+
+The files are for one Voile release, `v26.3.0-27.beta1` in this build, and go over the files that release shipped and no others, told by their SHA-256. Any other release, a development runtime, or a file that is neither Voile's nor ours is left untouched, and its games get the US keyboard as before: `status` then tells `us`. When a launch takes a newer Voile release, the layout is lost until a build of `obelisk-cli` carries files for it. A runtime that cannot be written stays as it is and the game starts all the same.
+
+Tested: the layout code against the Mac's own US, French, French - PC, German, Dvorak, ABC - AZERTY and Russian layouts (`tests/keyboard` in voile-lkd, 569 checks); and a Windows program run through the patched engine of a copy of `v26.3.0-27.beta1`, with keys injected by `wsdctl`, under French - PC, French, German and US layouts and across a change of input source: scan codes, virtual keys, raw input, characters, AltGr, dead keys, `MapVirtualKey`, `VkKeyScan` and `GetKeyNameText`. Never run: a key from a real keyboard, and a game.
+
 ## Questions answered in the player's place
 
 Where the app asks its player, a command answers at once and tells what it did.
@@ -410,5 +428,7 @@ cargo clippy -p obelisk-cli --all-targets -- -D warnings
 ```
 
 The tests reach neither Steam nor the Keychain. `cargo test -p obelisk-cli -- --ignored` also saves and forgets one item of the login Keychain, under this program's own service.
+
+The engine files of [Keyboard layout](#keyboard-layout) are checked in, in `crates/game-runtime/engine-patch`, and built by `scripts/build-engine-patch.sh` from checkouts of the two forks, zig 0.16.0 and an installed copy of the Voile release they are for. The script refuses sources that are not that release's commits plus ours, and a toolchain that does not rebuild the release's own driver byte for byte of code. Run it again for each Voile release to follow.
 
 `obelisk-cli` version is the `version` of `crates/obelisk-cli/Cargo.toml`; its releases are tagged `cli-v<version>` on the `cli` branch. It is licensed under the GNU General Public License v3.0, as Obelisk is.

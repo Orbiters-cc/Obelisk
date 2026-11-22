@@ -1,0 +1,11 @@
+{
+  "voile": "v26.3.0-27.beta1",
+  "sources": {
+    "voile-lkd": { "repository": "https://github.com/Orbiters-cc/voile-lkd", "commit": "0f0a0e2e05040b9840d272c0f636565c94a4794b", "base": "7c7d977d13d2dc01d03a1a5887621bb19c36c406", "license": "GPL-3.0-only" },
+    "voile-wine": { "repository": "https://github.com/Orbiters-cc/voile-wine", "commit": "9fcb535bcf5560307542c8b0cefe16b9a21b8e9c", "base": "d96760c4a34cbf180dbefb635478f97ca39c3e89", "license": "LGPL-2.1-or-later" }
+  },
+  "files": [
+    { "path": "engine/wsd", "source": "wsd", "original": "3713717453718d0ab3f45a7a35d4ba26dc6f7bb7ccd1607171c83b3cef57ab69", "patched": "7f5bc39c58cfced0be7842bf20c81c8f1b174df2de0d87d3d14b0664d230e0d0" },
+    { "path": "wine/lib/wine/x86_64-unix/wineobelisk.so", "source": "wineobelisk.so", "original": "ee7f087b62ab97ce5d6e485d3a4d03342ab535ff606fbca967c6ddff9b62ade3", "patched": "8f8610f1a099f2ae3b47432e6603026998d6f728a6e3c2134802ba2286553d2a" }
+  ]
+}

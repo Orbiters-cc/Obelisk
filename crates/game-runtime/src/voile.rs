@@ -29,6 +29,7 @@ use std::{
     time::Duration,
 };
 
+pub mod engine_patch;
 mod feed;
 
 use feed::Offered;
@@ -135,6 +136,14 @@ pub fn linux_runtime(root: &Path) -> Option<PathBuf> {
     }
     let linux = newest(root, &Offer::read(root))?.1.join(LINUX);
     has_engine(&linux).then_some(linux)
+}
+
+/// Which keyboard the games of the Linux engine in `root` get: the layout
+/// selected on the Mac once the Orbiters fork's engine files are in place,
+/// which they are from the first launch on the engine of the release they
+/// are for; a US keyboard in any other release. None without a Linux engine.
+pub fn keyboard(root: &Path) -> Option<engine_patch::Keyboard> {
+    linux_runtime(root).map(|linux| engine_patch::keyboard(&linux))
 }
 
 /// The engine and the Wine it runs.

@@ -58,6 +58,9 @@ pub struct Helpers {
 pub struct Voile {
     pub installed: Option<String>,
     pub prereleases: bool,
+    /// Which keyboard the games of the Linux engine get: `mac`, `pending`
+    /// or `us`. None without a Linux engine.
+    pub keyboard_layout: Option<&'static str>,
 }
 
 /// One way Steam offers to confirm a sign-in.
