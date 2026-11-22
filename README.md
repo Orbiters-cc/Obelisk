@@ -1,5 +1,7 @@
 <a name="readme-top"></a>
 
+> **This is the `cli` branch of the Orbiters fork.** It adds `obelisk-cli`, a command-line front end that runs Obelisk's engine without its window: see [docs/CLI.md](docs/CLI.md). `main` mirrors [Zagrios/Obelisk](https://github.com/Zagrios/Obelisk). `obelisk-cli` is not Obelisk's authors' work: do not report its problems to them.
+
 <div align="center">
   <img src="assets/readme/icon.png" alt="Obelisk icon" width="200" height="200">
   <h1>Obelisk</h1>

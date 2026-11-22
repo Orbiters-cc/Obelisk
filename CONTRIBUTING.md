@@ -9,6 +9,7 @@ This guide covers building Obelisk from source, testing it and finding your way 
 - [Testing](#testing)
 - [Windows games in development](#windows-games-in-development)
 - [Project layout](#project-layout)
+- [Command-line front end](#command-line-front-end)
 - [Interface text and translations](#interface-text-and-translations)
 - [Editing the Xcode project](#editing-the-xcode-project)
 - [Releases](#releases)
@@ -89,6 +90,7 @@ apps/macos/
 crates/
   obelisk-core/         Library cache, verification, publishing and the shared download engine
   obelisk-bridge/       UniFFI bridge between Swift and Rust
+  obelisk-cli/          Command-line front end: the engine without the app's window
   game-runtime/         Installations, download queue, launches, Wine, Cloud sync
   cloud-vault/          Local archive of each account's save versions
   steam-native/         Host that runs Valve's Steam components for games
@@ -100,6 +102,14 @@ scripts/                Build, run, test and release scripts
 `CONTEXT.md` defines the words the code uses, such as Transfer, Game session or Reservation. Read it before changing how games install or launch.
 
 The Steam, Epic Games and GOG protocols are implemented in Rust, from a study of public projects such as SteamKit, DepotDownloader, Legendary and Heroic. Obelisk runs none of them, nor SteamCMD. This repository redistributes neither the Steamworks SDK nor Wine.
+
+## Command-line front end
+
+`crates/obelisk-cli` builds `obelisk-cli`, which another program runs to sign in to Steam, install a Windows game, start it, follow it and stop it, without Obelisk's window. It calls `obelisk-bridge` as the app's Swift does and tells what happens as JSON Lines. It keeps its own library, in `~/Library/Application Support/cc.orbiters.obelisk-cli`, and its own Keychain item, and never touches the app's.
+
+[docs/CLI.md](docs/CLI.md) is its contract: every command, event and error code. Its tests fail when the program can tell an event or an error code that file does not describe. `scripts/build-cli.sh` builds it with the Steam helpers, signs them and writes `build/dist/obelisk-cli-<version>-arm64.tar.gz`. Its version is its crate's, and its releases are tagged `cli-v<version>`.
+
+The engine gives it two things the app does not need: `launch_settings::add_arguments`, which adds arguments to the games one process launches without keeping them, and `voile::takes_prereleases`.
 
 ## Interface text and translations
 
