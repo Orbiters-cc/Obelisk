@@ -57,12 +57,43 @@ fn an_uncapped_menu_reports_at_most_1000_fps() {
 #[test]
 fn a_log_without_hud_lines_reports_no_frames() {
     assert_eq!(Frames::default().median_fps(), None);
-    assert_eq!(
-        parsed("wine: starting\nerr:module:import_dll\n"),
-        Frames::default()
-    );
-    assert_eq!(parsed(""), Frames::default());
-    assert_eq!(read(Path::new("/nonexistent/game.log")), Frames::default());
+    let none = Frames {
+        measured: true,
+        ..Frames::default()
+    };
+    assert_eq!(parsed("wine: starting\nerr:module:import_dll\n"), none);
+    assert_eq!(parsed(""), none);
+}
+
+#[test]
+fn a_log_that_cannot_be_read_reports_an_unknown_count_not_zero() {
+    let frames = read(Path::new("/nonexistent/game.log"));
+    assert!(!frames.measured);
+    assert_eq!(frames.count, 0);
+    assert!(!Frames::default().measured, "no log at all is unknown too");
+    // A record written before the field was read the same way: measured.
+    let old: Frames = serde_json::from_str(
+        r#"{"count":0,"median_us":null,"slowest_percent_us":null,"hitches":0}"#,
+    )
+    .unwrap();
+    assert!(old.measured);
+}
+
+#[test]
+fn the_counter_counts_as_the_whole_log_does_whatever_the_reads_cut() {
+    let probe = include_str!("probe-60fps.log");
+    let whole = parsed(probe).count;
+    assert!(whole > 0);
+    for size in [1, 7, 64, 4096] {
+        let mut counter = Counter::default();
+        for chunk in probe.as_bytes().chunks(size) {
+            counter.feed(chunk);
+        }
+        // A last line without its newline is counted once it ends.
+        counter.feed(b"\n");
+        assert_eq!(counter.count(), whole, "reads of {size} bytes");
+    }
+    assert_eq!(Counter::default().count(), 0);
 }
 
 #[test]
@@ -97,7 +128,7 @@ fn the_hud_shows_over_the_game_only_when_asked() {
 fn a_report_drops_every_line_the_frames_come_from() {
     let probe = include_str!("probe-60fps.log");
     assert!(parsed(probe).count > 0);
-    assert_eq!(parsed(&without_frame_lines(probe)), Frames::default());
+    assert_eq!(parsed(&without_frame_lines(probe)).count, 0);
     assert_eq!(
         without_frame_lines("a\n\nmetal-HUD:x\nb\r\nmetal-HUD: 1\n"),
         "a\n\nb\r\n"

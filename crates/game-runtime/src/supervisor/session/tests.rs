@@ -1383,3 +1383,54 @@ fn a_cloud_question_is_abandoned_after_its_deadline_or_its_observer() {
     // Cloud questions and the Rosetta requirement share one counter.
     assert_eq!((supervised.next(), supervised.next()), (1, 2));
 }
+
+/// The frames a running game shows, counted from its log as it grows; a log
+/// cut shorter, replaced, or gone ends the count instead of restarting it.
+#[test]
+fn shown_frames_follow_the_log_and_stop_where_its_continuity_ends() {
+    use std::io::Write as _;
+    let hud = |frames: usize| {
+        let values: Vec<&str> = std::iter::repeat_n("16.67,0.02", frames).collect();
+        format!(
+            "2026-11-22 23:51:53.033 wsd[33500:11355269] metal-HUD: 1,26.91,100.14,{}\n",
+            values.join(",")
+        )
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wine-438100.log");
+    let mut log = ShownLog::new(path.clone());
+    assert_eq!(log.poll(), (0, true), "no log yet: nothing shown, still whole");
+    let mut file = fs::File::create(&path).unwrap();
+    file.write_all(hud(30).as_bytes()).unwrap();
+    // A line cut where a read ends counts once it is whole.
+    let next = hud(20);
+    file.write_all(&next.as_bytes()[..10]).unwrap();
+    assert_eq!(log.poll(), (30, true));
+    file.write_all(&next.as_bytes()[10..]).unwrap();
+    file.write_all(b"wsd: window 1 overlay: frame held 183.3 ms\n").unwrap();
+    assert_eq!(log.poll(), (50, true));
+    assert_eq!(log.poll(), (50, true), "nothing new, nothing more");
+
+    // Cut shorter in place: what follows is not counted from the start.
+    file.set_len(10).unwrap();
+    assert_eq!(log.poll(), (50, false));
+    file.write_all(hud(100).as_bytes()).unwrap();
+    assert_eq!(log.poll(), (50, false), "the count stays where it was");
+
+    // Replaced at its path (the next start's log): the same.
+    let path2 = dir.path().join("other.log");
+    let mut replaced = ShownLog::new(path2.clone());
+    fs::write(&path2, hud(5)).unwrap();
+    assert_eq!(replaced.poll(), (5, true));
+    fs::rename(dir.path().join("wine-438100.log"), dir.path().join("old.log")).unwrap();
+    fs::rename(&path2, dir.path().join("moved.log")).unwrap();
+    fs::write(&path2, hud(500)).unwrap();
+    assert_eq!(replaced.poll(), (5, false));
+    // And gone.
+    let path3 = dir.path().join("gone.log");
+    let mut gone = ShownLog::new(path3.clone());
+    fs::write(&path3, hud(7)).unwrap();
+    assert_eq!(gone.poll(), (7, true));
+    fs::remove_file(&path3).unwrap();
+    assert_eq!(gone.poll(), (7, false));
+}

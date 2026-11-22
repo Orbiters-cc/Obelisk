@@ -21,7 +21,7 @@ This file is the contract a program is written against. Tests in `crates/obelisk
 
 ## State of this build
 
-0.1.4 keeps VRChat's graphics alive under Voile's Linux engine: Neptune's render server refused any one resource update over 64 MiB, and VRChat sends one of 70,744,960 bytes seconds after an avatar loads, after which the game ran on with a frozen picture (sound on, nothing answering). The engine files now carry Neptune's render server too, taking an update up to 1 GiB: see [Graphics](#graphics). 0.1.3 tells which Game session holds the game: `running` and `exited` carry its `session_id`, `exited` the frames the game presented, and `steam quit --session` asks only that session's game to end (`other_session` otherwise), so that a program which started a game never ends one somebody else started meanwhile in the same library. 0.1.2 gives Windows games on Voile's Linux engine the keyboard layout selected on the Mac, for Voile `v26.3.0-27.beta1`: see [Keyboard layout](#keyboard-layout), which also tells what was tested. `status` tells it in `voile.keyboard_layout`. 0.1.1 is 0.1.0 signed with a Developer ID and sent to Apple's notary. It is a first build. `status`, `steam installed`, `settings prereleases`, the command line, every failure before Steam is reached, and `steam login --qr` up to its `challenge` event were run for real. A complete sign-in and `steam install` ran through Orbiters - N4N0 on 2026-11-22. `steam play` with arguments after `--`, `steam running` with a live session, `steam quit --wait` and `steam quit --force` ran against Steam with VRChat that day (0.1.1): the arguments reached the game in order, a quit took 6 s, and a game whose graphics had hung ignored Quit for 60 s and ended only with `--force`. The fields and the option 0.1.3 adds are covered by tests that drive the engine's states.
+0.1.5 says what the game shows while it runs, and only what it knows: the Game session's record carries `shown`, the frames the game has shown so far (see [Game session records](#game-session-records)); `exited.frames` is null when the game's log could not be read, instead of 0; and `exited` is the running session's own, never the record of another launch that became the library's last session meanwhile. 0.1.4 keeps VRChat's graphics alive under Voile's Linux engine: Neptune's render server refused any one resource update over 64 MiB, and VRChat sends one of 70,744,960 bytes seconds after an avatar loads, after which the game ran on with a frozen picture (sound on, nothing answering). The engine files now carry Neptune's render server too, taking an update up to 1 GiB: see [Graphics](#graphics). 0.1.3 tells which Game session holds the game: `running` and `exited` carry its `session_id`, `exited` the frames the game presented, and `steam quit --session` asks only that session's game to end (`other_session` otherwise), so that a program which started a game never ends one somebody else started meanwhile in the same library. 0.1.2 gives Windows games on Voile's Linux engine the keyboard layout selected on the Mac, for Voile `v26.3.0-27.beta1`: see [Keyboard layout](#keyboard-layout), which also tells what was tested. `status` tells it in `voile.keyboard_layout`. 0.1.1 is 0.1.0 signed with a Developer ID and sent to Apple's notary. It is a first build. `status`, `steam installed`, `settings prereleases`, the command line, every failure before Steam is reached, and `steam login --qr` up to its `challenge` event were run for real. A complete sign-in and `steam install` ran through Orbiters - N4N0 on 2026-11-22. `steam play` with arguments after `--`, `steam running` with a live session, `steam quit --wait` and `steam quit --force` ran against Steam with VRChat that day (0.1.1): the arguments reached the game in order, a quit took 6 s, and a game whose graphics had hung ignored Quit for 60 s and ended only with `--force`. The fields and the option 0.1.3 adds are covered by tests that drive the engine's states.
 
 ## Invocation
 
@@ -72,6 +72,22 @@ security delete-generic-password -s cc.orbiters.obelisk-cli.steam -a "<library d
 
 The engine reads Voile's signed feed from `Zagrios/Voile` and the game profiles from `Zagrios/Obelisk` on GitHub as a Windows game launches, and downloads Voile from that repository's releases.
 
+
+### Game session records
+
+A Game session's record, `<library>/SteamSessions/<session id>.v2.json`, is its supervisor's journal, rewritten as the session changes; this program reads it and so may another. What a reader may rely on:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `id` | string | The Game session's UUID, the file's name. |
+| `store.app_id` | number | The Steam game. |
+| `phase` | string | `Preparing`, `Running`, `Finalizing`, `Finished` or `Failed`. |
+| `game.pid` | number | While the game runs: the process the supervisor started for it (for a Windows game, the engine's launcher). |
+| `played.seconds`, `played.frames.count` | numbers | Once the game exited: how long it ran, and the frames it presented in all. |
+| `played.frames.measured` | boolean | From 0.1.5: false when the game's log could not be read, and then `count` (0) is not known. Absent in older records, which read the log the same way: count them as `true`. |
+| `shown` | object or absent | From 0.1.5, while a game whose launch writes a log runs: `frames` (number), the frames it has shown so far, read from that log every 2 s and written when it changes, else at least every 10 s; `at` (number), when that was, in seconds since 1970; `continuous` (boolean), the log was read whole from the game's start: false once it was cut shorter, replaced at its path or could no longer be read, after which `frames` stays where it was and tells nothing more of the game's graphics. A game whose graphics stopped shows no new frame: `frames` stops growing while `at` goes on. Kept as it was last written once the game exited. |
+
+The log is the one the game's launch writes Metal's frame reports to (for Steam on the Linux engine, `~/Library/Logs/Obelisk/Steam/wine-<app id>.log`, a new file at each launch); `shown` follows the file that was there when the game began, by its handle, so a later launch's log is never counted for this session.
 ## Commands
 
 ### `status`
@@ -267,7 +283,7 @@ Keeps whether Windows games run in Voile's pre-releases too, as the app's beta r
 | --- | --- | --- |
 | `app_id` | number | The game. |
 | `session_id` | string or null | The Game session that held the game. Null when it is not known. |
-| `frames` | number or null | How many frames the game presented to the screen in all, as its Game session counted them: 0 for a game whose graphics never showed anything. Null when it is not known. |
+| `frames` | number or null | How many frames the game presented to the screen in all, as its Game session counted them: 0 for a game whose graphics never showed anything. Null when it is not known: the game's log, where Metal reports them, was missing or could not be read (from 0.1.5; 0.1.4 and before said 0), or the session's record could not be read. |
 | `exit_code` | number or null | The game's exit code. Null when a signal ended it or when it is not known. |
 | `exit_signal` | number or null | The signal that ended it, if one did. |
 | `seconds` | number or null | How long it ran. |

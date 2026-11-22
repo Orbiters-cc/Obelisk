@@ -209,6 +209,8 @@ pub struct Play {
     throttle: Throttle,
     starting: bool,
     running: bool,
+    /// The Game session seen running: only its own record says how it ended.
+    session: Option<String>,
     /// The session and release of the Voile offer already taken.
     voile: Option<(String, String)>,
     rosetta: Option<u64>,
@@ -227,6 +229,7 @@ impl Play {
             throttle: Throttle::default(),
             starting: false,
             running: false,
+            session: None,
             voile: None,
             rosetta: None,
             cloud: None,
@@ -296,6 +299,7 @@ impl Play {
             }
             if active.phase == GamePhase::Running && !self.running {
                 self.running = true;
+                self.session = Some(active.id.clone());
                 steps.push(PlayStep::Tell(Event::Running {
                     app_id,
                     pid: pid(&active.id),
@@ -367,11 +371,14 @@ impl Play {
     ) -> Vec<PlayStep> {
         let app_id = self.app_id;
         let mut steps = Vec::new();
-        // A short game may show only there, already finished.
-        let last = sessions
-            .last
-            .as_ref()
-            .filter(|last| self.ours(last) && last.observed);
+        // A short game may show only there, already finished. Once its
+        // session was seen running, only that session's record is its: another
+        // launch of the game in the library may have become the last since.
+        let last = sessions.last.as_ref().filter(|last| {
+            self.ours(last)
+                && last.observed
+                && self.session.as_ref().is_none_or(|id| *id == last.id)
+        });
         let played = last.and_then(|last| last.played.as_ref());
         let ran =
             self.running || played.is_some() || last.is_some_and(|last| last.started_at.is_some());
@@ -388,8 +395,14 @@ impl Play {
             }
             steps.push(PlayStep::Tell(Event::Exited {
                 app_id,
-                session_id: last.map(|last| last.id.clone()),
-                frames: played.map(|played| played.frames),
+                session_id: self
+                    .session
+                    .clone()
+                    .or_else(|| last.map(|last| last.id.clone())),
+                // Unknown, not 0, when the game's log could not be read.
+                frames: played
+                    .filter(|played| played.frames_measured)
+                    .map(|played| played.frames),
                 exit_code: played.and_then(|played| played.exit_code),
                 exit_signal: played.and_then(|played| played.exit_signal),
                 seconds: played.map(|played| played.seconds),

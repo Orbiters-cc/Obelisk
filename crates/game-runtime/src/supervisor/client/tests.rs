@@ -115,6 +115,7 @@ impl<P: Sample> Fixture<P> {
             reconnecting: false,
             supervisor: process(SUPERVISOR),
             game,
+            shown: None,
             starting: None,
             socket: root.path().join("unused-socket"),
         };

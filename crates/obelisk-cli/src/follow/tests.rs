@@ -289,6 +289,7 @@ fn played(exit_code: Option<i32>) -> GamePlayed {
     GamePlayed {
         seconds: 3_600,
         frames: 100,
+        frames_measured: true,
         median_fps: Some(72.0),
         low_1pct_fps: Some(40.0),
         hitches: 0,
@@ -386,6 +387,53 @@ fn a_game_that_ran_and_exited_between_two_looks_still_tells_its_whole_life() {
             "end"
         ]
     );
+}
+
+#[test]
+fn the_exit_told_is_the_running_session_s_own_never_another_s() {
+    let mut follow = Play::new(VRCHAT, GORDON);
+    let now = Instant::now();
+    let running = active(session("ours", GamePhase::Running, true));
+    assert_eq!(follow.observe(&held(), &running, pid, now).len(), 2, "starting, running");
+    // Ours ended, and another launch of the game in this library became the
+    // last session before this look: its frames and exit are not ours.
+    let other = GameSessionsState {
+        last: Some(GameSessionState {
+            played: Some(played(Some(0))),
+            started_at: Some(1_790_000_000),
+            ..session("someone-else-s", GamePhase::Finished, true)
+        }),
+        ..no_session()
+    };
+    let released = InstallationsState {
+        installations: vec![vrchat()],
+        ..idle()
+    };
+    assert_eq!(
+        lines(&follow.observe(&released, &other, pid, now)),
+        [
+            r#"{"event":"exited","app_id":438100,"session_id":"ours","frames":null,"exit_code":null,"exit_signal":null,"seconds":null,"ended_by_request":false}"#,
+            "end"
+        ]
+    );
+}
+
+#[test]
+fn frames_the_game_s_log_could_not_tell_are_null_not_zero() {
+    let mut follow = Play::new(VRCHAT, GORDON);
+    let unread = GameSessionsState {
+        last: Some(GameSessionState {
+            played: Some(GamePlayed {
+                frames: 0,
+                frames_measured: false,
+                ..played(Some(0))
+            }),
+            ..session("supervised", GamePhase::Finished, true)
+        }),
+        ..no_session()
+    };
+    let told = lines(&follow.observe(&idle(), &unread, pid, Instant::now()));
+    assert!(told.iter().any(|l| l.contains(r#""event":"exited""#) && l.contains(r#""frames":null"#)), "{told:?}");
 }
 
 #[test]

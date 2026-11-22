@@ -556,6 +556,10 @@ pub struct GameSessionState {
 pub struct GamePlayed {
     pub seconds: u64,
     pub frames: u64,
+    /// `frames` was read from the game's log; false when there was no log or
+    /// it could not be read, and then `frames` (0) is not known.
+    #[uniffi(default = true)]
+    pub frames_measured: bool,
     pub median_fps: Option<f64>,
     pub low_1pct_fps: Option<f64>,
     pub hitches: u64,
@@ -574,6 +578,7 @@ impl From<game_runtime::supervisor::Played> for GamePlayed {
         Self {
             seconds: played.seconds,
             frames: played.frames.count,
+            frames_measured: played.frames.measured,
             median_fps: played.frames.median_fps(),
             low_1pct_fps: played.frames.low_1pct_fps(),
             hitches: played.frames.hitches,

@@ -145,6 +145,19 @@ pub struct Played {
     pub voile: Option<String>,
 }
 
+/// The frames a running game has shown so far, read from its log as it grows
+/// (`metal_hud::Counter`), a few seconds behind at most.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Shown {
+    pub frames: u64,
+    /// When the count was taken, in seconds since 1970.
+    pub at: u64,
+    /// The log was read whole from the game's start: false once it was cut
+    /// shorter, replaced or could no longer be read, after which `frames`
+    /// stays where it was and says nothing more of the game's graphics.
+    pub continuous: bool,
+}
+
 /// A Game session as its supervisor journals it. Ownership (the supervisor,
 /// game, starting helper and socket) decides the Reservation.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -171,6 +184,10 @@ pub struct Record<P: Provider> {
     pub reconnecting: bool,
     pub supervisor: Identity,
     pub game: Option<Identity>,
+    /// While the game runs: the frames it has shown so far, as Metal reports
+    /// them in its log. Absent for a game whose launch writes no log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shown: Option<Shown>,
     #[serde(default)]
     pub starting: Option<StartingGame>,
     pub socket: PathBuf,

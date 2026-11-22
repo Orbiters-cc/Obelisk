@@ -124,6 +124,7 @@ fn snapshot(cloud: crate::cloud::Status) -> Snapshot {
             executable: "supervisor".into(),
         },
         game: None,
+        shown: None,
         starting: None,
         socket: "/library/GOGSessions/socket".into(),
     }

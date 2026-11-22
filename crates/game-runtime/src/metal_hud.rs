@@ -42,6 +42,12 @@ const MAX_FPS: f64 = 1000.0;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Frames {
     pub count: u64,
+    /// The game's log was read: `count` is what Metal reported, 0 included.
+    /// False when there was no log to read, or it could not be read: the
+    /// count is then unknown, not 0. Records written before this field have
+    /// it true, as they were read the same way.
+    #[serde(default = "measured")]
+    pub measured: bool,
     /// The median present interval, in microseconds.
     pub median_us: Option<u32>,
     /// The 99th percentile present interval, in microseconds: the slowest
@@ -61,7 +67,12 @@ impl Frames {
     }
 }
 
-/// The frames `log` reports. A log that cannot be read reports none.
+fn measured() -> bool {
+    true
+}
+
+/// The frames `log` reports. A log that cannot be read reports an unknown
+/// count ([`Frames::measured`] false).
 pub fn read(log: &Path) -> Frames {
     File::open(log)
         .and_then(|file| parse(BufReader::new(file)))
@@ -119,7 +130,10 @@ fn pid(prefix: &[u8]) -> u32 {
 
 fn frames(intervals: &mut [f32]) -> Frames {
     if intervals.is_empty() {
-        return Frames::default();
+        return Frames {
+            measured: true,
+            ..Frames::default()
+        };
     }
     intervals.sort_by(f32::total_cmp);
     let count = intervals.len();
@@ -133,9 +147,52 @@ fn frames(intervals: &mut [f32]) -> Frames {
     let p99 = intervals[(count * 99).div_ceil(100) - 1];
     Frames {
         count: count as u64,
+        measured: true,
         median_us: Some(microseconds(median)),
         slowest_percent_us: Some(microseconds(p99)),
         hitches: intervals.iter().filter(|&&i| i > HITCH_MS).count() as u64,
+    }
+}
+
+/// The frames a game presented so far, from its log as it grows: the bytes
+/// are given as they come, lines cut at the end of one read are completed by
+/// the next. Counts as [`read`] does, for the process that presented the most.
+#[derive(Debug, Default)]
+pub struct Counter {
+    per_process: HashMap<u32, u64>,
+    partial: Vec<u8>,
+}
+impl Counter {
+    pub fn feed(&mut self, bytes: &[u8]) {
+        self.partial.extend_from_slice(bytes);
+        let Some(end) = self.partial.iter().rposition(|b| *b == b'\n') else {
+            // A line longer than any Metal writes is not one of its.
+            if self.partial.len() > 1 << 20 {
+                self.partial.clear();
+            }
+            return;
+        };
+        let lines: Vec<u8> = self.partial.drain(..=end).collect();
+        for line in lines.split(|b| *b == b'\n') {
+            let Some(at) = line.windows(MARKER.len()).position(|w| w == MARKER) else {
+                continue;
+            };
+            let values = String::from_utf8_lossy(&line[at + MARKER.len()..]);
+            let shown = values
+                .trim_end()
+                .split(',')
+                .skip(3)
+                .step_by(2)
+                .filter_map(|value| value.parse::<f32>().ok())
+                .filter(|interval| interval.is_finite() && *interval > 0.0)
+                .count() as u64;
+            *self.per_process.entry(pid(&line[..at])).or_default() += shown;
+        }
+    }
+
+    /// The frames of the process that presented the most so far.
+    pub fn count(&self) -> u64 {
+        self.per_process.values().copied().max().unwrap_or(0)
     }
 }
 
