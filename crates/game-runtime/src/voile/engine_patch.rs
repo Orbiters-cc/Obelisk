@@ -111,16 +111,16 @@ fn built_in() -> &'static Patch {
     VALUE.get_or_init(|| {
         let manifest: Manifest =
             serde_json::from_str(MANIFEST).expect("checked-in engine patch manifest");
-        #[cfg(feature = "developer-timeline")]
-        return developer::patch(manifest);
-        #[cfg(not(feature = "developer-timeline"))]
-        released(manifest)
+        of(manifest)
     })
 }
 
-/// The files and sets of a manifest, as every build has them.
-#[cfg_attr(feature = "developer-timeline", allow(dead_code, reason = "developer.rs has its own"))]
-fn released(manifest: Manifest) -> Patch {
+#[cfg(feature = "developer-timeline")]
+use developer::patch as of;
+
+/// The files and sets of a manifest.
+#[cfg(not(feature = "developer-timeline"))]
+fn of(manifest: Manifest) -> Patch {
     let published = manifest
         .generations
         .iter()
@@ -1396,10 +1396,18 @@ pub fn apply(linux: &Path) -> Result<(Keyboard, Pin), Incoherent> {
 
 /// The same for a launch that was admitted before it picked `linux`.
 pub(crate) fn apply_admitted(linux: &Path, admitted: Admitted) -> Result<(Keyboard, Pin), Incoherent> {
-    let prepared = built_in().prepare(linux, admitted);
-    #[cfg(feature = "developer-timeline")]
-    let prepared = prepared.and_then(|held| developer::proven(built_in(), linux).map(|()| held));
-    prepared
+    built_in().prepare(linux, admitted).and_then(|held| asked_for(linux).map(|()| held))
+}
+
+/// Whether the files in `linux`, proven to be a set, are the one this process is to start games on.
+#[cfg(feature = "developer-timeline")]
+fn asked_for(linux: &Path) -> Result<(), Incoherent> {
+    developer::proven(built_in(), linux)
+}
+
+#[cfg(not(feature = "developer-timeline"))]
+fn asked_for(_: &Path) -> Result<(), Incoherent> {
+    Ok(())
 }
 
 /// Whether the file at `path` of the Linux engine `linux` is one of ours to patch: its digest is what proves it.
@@ -1544,7 +1552,7 @@ mod tests {
         (root, linux)
     }
 
-    #[cfg(not(feature = "developer-timeline"))] // (two of its files come from a folder: developer.rs)
+    #[cfg_attr(feature = "developer-timeline", ignore = "two of its files come from a folder (developer.rs)")]
     #[test]
     fn the_files_built_in_are_the_ones_the_manifest_names() {
         let patch = built_in();
