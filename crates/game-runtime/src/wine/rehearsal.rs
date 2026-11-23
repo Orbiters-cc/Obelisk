@@ -49,6 +49,7 @@ pub fn start(
         game_mode: true,
         locale: None,
     };
+    let admitted = super::admit(locations)?;
     let runtime = crate::voile::linux_runtime(&locations.voile).ok_or(Error::WineUnavailable)?;
     let config = Config {
         runtime,
@@ -57,7 +58,7 @@ pub fn start(
         settings,
     };
     let adapter = config.adapter();
-    let pin = adapter.ready(&config, locations, &NoStore)?;
+    let pin = adapter.ready(&config, locations, &NoStore, admitted)?;
     let launched = LaunchTarget {
         executable: program.to_string_lossy().into_owned(),
         arguments: arguments.to_vec(),
