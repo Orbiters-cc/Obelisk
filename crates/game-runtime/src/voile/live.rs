@@ -190,22 +190,26 @@ fn processes(root: &Path, tools: &Tools) -> Census {
 }
 
 /// The processes of an `lsof -Fpn` listing with each file they run or map;
-/// `None` for one that is not whole, or not such a listing.
+/// `None` for one that is not whole, or not such a listing: a process is
+/// followed by a file or more, each file by its name.
 fn mapped(listing: &str) -> Option<Vec<(u32, &str)>> {
     if !listing.ends_with('\n') {
         return None;
     }
     let mut pid = None;
     let mut files = Vec::new();
+    let mut before = b'n';
     for line in listing.lines() {
-        match line.as_bytes().first()? {
-            b'p' => pid = Some(line[1..].parse().ok()?),
-            b'f' if line == "ftxt" && pid.is_some() => {}
-            b'n' => files.push((pid?, &line[1..])),
+        let field = *line.as_bytes().first()?;
+        match (before, field) {
+            (b'n', b'p') => pid = Some(line[1..].parse().ok()?),
+            (b'p' | b'n', b'f') if line == "ftxt" => {}
+            (b'f', b'n') if line.len() > 1 => files.push((pid?, &line[1..])),
             _ => return None,
         }
+        before = field;
     }
-    Some(files)
+    (before == b'n').then_some(files)
 }
 
 #[cfg(test)]
@@ -451,6 +455,11 @@ pub(crate) mod tests {
             format!("{whole}; printf 'what is this\\n'"),
             format!("printf 'n/no/process\\n'; {whole}"),
             "printf 'p1\\nftxt\\nn/sbin/launchd\\n'".to_owned(),
+            // Eighth verification, minor (the verifier's): a last record cut at the end of a line.
+            format!("{whole}; printf 'p2\\n'"),
+            format!("{whole}; printf 'p2\\nftxt\\n'"),
+            format!("{whole}; printf 'p2\\nftxt\\nn\\n'"),
+            format!("{whole}; printf 'p2\\nftxt\\nn/bin/sh\\nftxt\\n'"),
         ] {
             assert!(matches!(look(None, Some(&failed)), Census::Unknown(_)), "lsof: {failed}");
         }

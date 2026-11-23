@@ -4,10 +4,10 @@
 //! has its size and can be run. Its content is proven by the archive's own
 //! digests when it is laid (`members.rs`), and for our engine files by theirs
 //! at every start.
-use super::{LINUX, engine_patch, release_of};
+use super::{LINUX, WINE, engine_patch, has_wine, is_release, release_of};
 use crate::wine::{Engine, Graphics};
 use serde::Deserialize;
-use std::{fs, os::unix::fs::PermissionsExt, path::{Path, PathBuf}, sync::OnceLock};
+use std::{fs, path::{Path, PathBuf}, sync::OnceLock};
 
 /// What every release's Linux engine starts a game from (`launch.sh`), and
 /// whether it is run.
@@ -89,13 +89,16 @@ impl File {
         // Ours in its place has a size of its own, and is proven by its digest.
         let patched = self.path.strip_prefix("linux/").is_some_and(engine_patch::proven);
         fs::symlink_metadata(&path).is_ok_and(|found| {
-            found.is_file() && (patched || found.len() == self.size) && (!self.executable || runs(&found))
+            found.is_file() && (patched || found.len() == self.size) && (!self.executable || runs(&path))
         })
     }
 }
 
-fn runs(found: &fs::Metadata) -> bool {
-    found.permissions().mode() & 0o111 != 0
+/// Whether this process can run the file at `path`, as its starts will: its
+/// mode has an owner, a group and others, and only what is this user's counts.
+fn runs(path: &Path) -> bool {
+    use rustix::fs::{Access, AtFlags, CWD, accessat};
+    accessat(CWD, path, Access::EXEC_OK, AtFlags::EACCESS).is_ok()
 }
 
 /// The files a game of `engine` that renders with `graphics` cannot start
@@ -108,19 +111,24 @@ pub(crate) fn lacking(runtime: &Path, engine: Engine, graphics: Graphics) -> Vec
             Graphics::D3DMetal => D3DMETAL,
         };
         for (path, run) in ENGINE.into_iter().chain(backend) {
-            let there = fs::metadata(runtime.join(path))
-                .is_ok_and(|found| found.is_file() && found.len() > 0 && (!run || runs(&found)));
+            let path_in = runtime.join(path);
+            let there = fs::metadata(&path_in)
+                .is_ok_and(|found| found.is_file() && found.len() > 0 && (!run || runs(&path_in)));
             if !there {
                 lacking.push(path.to_owned());
             }
         }
     }
+    let (release, inside) = match engine {
+        Engine::Linux => (runtime.parent().unwrap_or(runtime), "linux/"),
+        Engine::Rosetta => (runtime, ""),
+    };
+    // Its own Wine, which every release has, is how one is known to be there.
+    if is_release(release) && !has_wine(release) {
+        lacking.push(WINE.to_owned());
+    }
     let known = built_in();
     if release_of(runtime).as_deref() == Some(known.voile.as_str()) {
-        let (release, inside) = match engine {
-            Engine::Linux => (runtime.parent().unwrap_or(runtime), "linux/"),
-            Engine::Rosetta => (runtime, ""),
-        };
         for file in &known.files {
             if file.needed(engine, graphics) && !file.there(release) {
                 let path = file.path.strip_prefix(inside).unwrap_or(&file.path);
@@ -145,6 +153,7 @@ pub(super) fn complete(release: &Path) -> bool {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     /// Lays in the Linux engine `linux` what a game of any release starts
     /// from, each a placeholder, where it is not there yet.
@@ -209,6 +218,8 @@ pub(crate) mod tests {
             |path: &Path| fs::remove_file(path),
             |path: &Path| fs::File::options().write(true).open(path)?.set_len(7),
             |path: &Path| fs::set_permissions(path, fs::Permissions::from_mode(0o644)),
+            // (eighth verification: run by anyone but its owner)
+            |path: &Path| fs::set_permissions(path, fs::Permissions::from_mode(0o645)),
             |path: &Path| {
                 fs::remove_file(path)?;
                 fs::create_dir(path)

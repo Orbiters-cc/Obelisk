@@ -135,8 +135,18 @@ fn development(root: &Path) -> Option<PathBuf> {
     has_wine(&development).then_some(development)
 }
 
+/// The Wine of a runtime.
+const WINE: &str = "bin/wine";
+
 fn has_wine(runtime: &Path) -> bool {
-    runtime.join("bin/wine").is_file()
+    runtime.join(WINE).is_file()
+}
+
+/// Whether `runtime` is a release's folder, named as its runtime.json names
+/// it, whatever it lost: the development runtime is none.
+fn is_release(runtime: &Path) -> bool {
+    let name = runtime.file_name().and_then(|name| name.to_str());
+    name.is_some_and(|name| numbers(name).is_some() && version(runtime).as_deref() == Some(name))
 }
 
 /// Whether `runtime` holds the Wine of `release`, as its runtime.json names
@@ -265,7 +275,8 @@ fn is_beta(version: &str) -> bool {
 
 /// The newest release installed in `root` that Obelisk runs, with its
 /// version's numbers: a folder named after the release its runtime.json
-/// names, of Obelisk's contract, that `offer` does not leave.
+/// names, of Obelisk's contract, that `offer` does not leave. Whatever it lost,
+/// its Wine too, is for whoever starts a game there to tell ([`lacking`]).
 fn newest(root: &Path, offer: &Offer) -> Option<(Vec<u64>, PathBuf)> {
     fs::read_dir(root)
         .ok()?
@@ -275,11 +286,8 @@ fn newest(root: &Path, offer: &Offer) -> Option<(Vec<u64>, PathBuf)> {
             let order = numbers(&name)?;
             let runtime = entry.path();
             let manifest = manifest(&runtime)?;
-            (has_wine(&runtime)
-                && manifest.version == name
-                && manifest.contract == contract()
-                && !offer.leaves(&name))
-            .then_some((order, runtime))
+            (manifest.version == name && manifest.contract == contract() && !offer.leaves(&name))
+                .then_some((order, runtime))
         })
         .max_by(|a, b| a.0.cmp(&b.0))
 }
@@ -511,8 +519,8 @@ impl Install {
             // meanwhile, a disk may have cut one short.
             whole(&runtime, &release, &members)?;
             step("after-validation");
-            if replaces {
-                let _held = engine_patch::Replacing::hold(&destination)?.ok_or(Failure::InUse)?;
+            let held = if replaces {
+                let held = engine_patch::Replacing::hold(&destination)?.ok_or(Failure::InUse)?;
                 step("after-lock");
                 exchange(&runtime, &destination)?;
                 // Now the one it replaced: it goes only once the new one is
@@ -526,9 +534,10 @@ impl Install {
                 }
                 step("after-verification");
                 let _ = fs::remove_dir_all(replaced);
+                held
             } else {
                 use rustix::fs::{CWD, RenameFlags, renameat_with};
-                let _held = engine_patch::Replacing::free(&destination)?.ok_or(Failure::InUse)?;
+                let held = engine_patch::Replacing::free(&destination)?.ok_or(Failure::InUse)?;
                 renameat_with(CWD, &runtime, CWD, &destination, RenameFlags::NOREPLACE)
                     .map_err(std::io::Error::from)?;
                 if let Err(failure) = whole(&destination, &release, &members) {
@@ -536,10 +545,14 @@ impl Install {
                         .map_err(std::io::Error::from)?;
                     return Err(failure);
                 }
-            }
+                held
+            };
             // Nothing an unfinished install of it left is needed any more; a
-            // whole runtime of another release kept there may be.
-            remove_entries(&root, |name| name.starts_with(UNFINISHED) && !saves_another(&root.join(name), &release));
+            // whole runtime of another release kept there may be, and what
+            // runs from one goes with a later install.
+            if held.idle() {
+                remove_entries(&root, |name| name.starts_with(UNFINISHED) && !saves_another(&root.join(name), &release));
+            }
             step("after-cleanup");
             Ok(destination)
         })
@@ -772,6 +785,10 @@ pub fn remove_replaced(root: &Path) {
     let Some((_, kept)) = newest(root, &Offer::read(root)) else {
         return;
     };
+    // One that lost its Wine is to be laid again first: until then no other goes.
+    if !has_wine(&kept) {
+        return;
+    }
     let kept = kept
         .file_name()
         .map(|name| name.to_string_lossy().into_owned());

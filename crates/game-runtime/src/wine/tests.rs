@@ -750,6 +750,58 @@ fn a_release_that_lost_what_its_backend_starts_from_is_refused_by_its_path() {
     }
 }
 
+/// Eighth verification, its last major (the verifier's fixtures): a release
+/// that lost its top-level Wine, or whose broker its owner cannot run, is
+/// refused by its path and by its name on either engine, whatever older
+/// release is whole beside it, and nothing is removed for it.
+#[test]
+fn a_release_that_lost_its_wine_or_cannot_run_its_broker_names_itself() {
+    use crate::voile::engine_patch;
+    use std::os::unix::fs::PermissionsExt;
+    let vrchat = crate::profile::Game::Steam { app_id: 438100 };
+    for (game_of, path) in [
+        (vrchat, "bin/wine"),
+        (OTHER, "bin/wine"),
+        (vrchat, "linux/graphics/bin/virgl_test_server"),
+    ] {
+        let (_directory, root) = installation();
+        let locations = locations(&root);
+        crate::voile::take_prereleases(&locations.voile, true).unwrap();
+        let release = locations.voile.join(engine_patch::release());
+        crate::voile::required::tests::lay_release(&release);
+        engine_patch::lay_ours(&release.join("linux"));
+        // (an older release, whole as far as its names tell)
+        let older = locations.voile.join("v1.0.0-1");
+        fs::create_dir_all(older.join("bin")).unwrap();
+        fs::write(older.join("bin/wine"), "wine").unwrap();
+        fs::write(older.join("runtime.json"), r#"{"version": "v1.0.0-1"}"#).unwrap();
+        crate::voile::required::tests::lay(&older.join("linux"));
+        let (install, target) = game(&root);
+        fs::write(install.join("start_protected_game.exe"), pe()).unwrap();
+        let windows = windows_of(&locations, game_of, &install);
+        let damaged = release.join(path);
+        let mut expected = path.strip_prefix("linux/").unwrap_or(path);
+        if path == "bin/wine" {
+            fs::remove_file(&damaged).unwrap();
+            expected = "bin/wine";
+        } else {
+            fs::set_permissions(&damaged, fs::Permissions::from_mode(0o645)).unwrap();
+        }
+        match windows.ready(&locations, &target, &Plain::default()) {
+            Err(Error::EngineFiles(refused)) => {
+                assert_eq!(refused.paths, [expected]);
+                assert_eq!(refused.action, engine_patch::Action::Repair);
+                assert!(refused.reason.contains(engine_patch::release()), "{}", refused.reason);
+            }
+            other => panic!("{path}: {other:?}"),
+        }
+        assert!(!windows.prefix().exists(), "{path}");
+        assert_eq!(crate::voile::installed_release(&locations.voile).as_deref(), Some(engine_patch::release()));
+        crate::voile::remove_replaced(&locations.voile);
+        assert!(older.is_dir() || path != "bin/wine", "the only release with a Wine stays");
+    }
+}
+
 /// Seventh verification, blocker 2: a launch on either engine holds the
 /// library from before its runtime is picked to its own end, and nothing of
 /// the runtimes changes meanwhile, not even a release it does not run in.

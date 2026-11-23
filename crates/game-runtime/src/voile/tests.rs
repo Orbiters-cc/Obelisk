@@ -1043,3 +1043,25 @@ async fn a_real_release_is_found_whole() {
     assert!(has_engine(&linux) && engine_patch::pristine(&linux, &release.version));
     assert_eq!(names(&root), [&*release.version]);
 }
+
+/// Eighth verification, minor (the verifier's fixture): an install of a
+/// release that is not there yet leaves a staging folder something runs from,
+/// and a later one, with nothing running, removes it.
+#[tokio::test]
+async fn an_install_leaves_a_staging_folder_in_use() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("Voile");
+    let (archive, release) = release_archive(directory.path(), "v1.0.0-2", "v1.0.0-2");
+    let mapped = root.join(".previous/voile-v1.0.0-2/bin/tool");
+    let running = live::tests::Running::at(&mapped);
+    assert!(live::idle(&root).is_err());
+    let place = Install::new().install(&root, &release, Some(&archive)).await.unwrap();
+    assert!(has_wine(&place));
+    assert!(mapped.exists(), "something runs from it");
+    // A whole release of another name is what an interrupted repair saved: it stays either way.
+    running.end();
+    fs::remove_dir_all(&place).unwrap();
+    Install::new().install(&root, &release, Some(&archive)).await.unwrap();
+    assert!(!mapped.exists(), "nothing does any more");
+    assert_eq!(names(&root), ["v1.0.0-2"]);
+}

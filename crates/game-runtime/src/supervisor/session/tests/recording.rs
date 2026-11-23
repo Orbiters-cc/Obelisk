@@ -340,6 +340,40 @@ fn a_supervisor_holds_its_preparation_s_pin_until_its_game_exits() {
     free(&release);
 }
 
+/// Eighth verification, blocker: a lock file that cannot be written is
+/// inherited and held like any other, its descriptor one that only reads.
+#[test]
+fn a_supervisor_holds_a_lock_file_that_cannot_be_written() {
+    use std::os::unix::fs::PermissionsExt;
+    let wine = tempfile::tempdir().unwrap();
+    let (config, release) = on_the_linux_engine(wine.path());
+    drop(crate::voile::engine_patch::apply(&config.runtime).unwrap());
+    let voile = release.parent().unwrap();
+    let mut locks = voile.as_os_str().to_owned();
+    locks.push(".locks");
+    for lock in fs::read_dir(locks).unwrap() {
+        fs::set_permissions(lock.unwrap().path(), fs::Permissions::from_mode(0o444)).unwrap();
+    }
+    let (_, pin) = crate::voile::engine_patch::apply(&config.runtime).unwrap();
+    let (root, directory, sessions) = prepare(&Script {
+        wine: Some(config),
+        ..script(HELD)
+    });
+    let client = start_pinned::<Recording>(&directory, &sessions, Some(&pin)).unwrap();
+    let run = Run::<Recording> {
+        _root: root,
+        directory,
+        sessions,
+        client,
+    };
+    drop(pin);
+    run.until(|record| record.phase == Phase::Running);
+    assert!(held(&release), "a running game's files are held");
+    run.release("release-game");
+    run.until(|record| record.finished());
+    free(&release);
+}
+
 /// Finding 2: the lock is the child's from its fork on, so that a parent lost
 /// before its supervisor did anything leaves no gap.
 #[test]

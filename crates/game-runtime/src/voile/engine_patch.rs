@@ -557,7 +557,12 @@ impl Replacing {
     /// Holds `runtime` (`<voile>/<release>`) to replace or remove what is there; `None` while a game's session
     /// holds the library, anything of its engine runs, or that cannot be told.
     pub(crate) fn hold(runtime: &Path) -> io::Result<Option<Self>> {
-        Ok(Self::free(runtime)?.filter(|held| held._library.idle()))
+        Ok(Self::free(runtime)?.filter(Self::idle))
+    }
+
+    /// Whether nothing of the library's engine is proven to run, told when so.
+    pub(crate) fn idle(&self) -> bool {
+        self._library.idle()
     }
 
     /// Holds `runtime`, where nothing is yet; `None` while a launch or a game holds the library.
@@ -671,8 +676,21 @@ fn read_sha(path: &Path) -> Result<Option<String>, String> {
     }
 }
 
+/// The lock file at `path`, made only where there is none: a lock is held on what can only be read too, and one
+/// that is there may be.
 fn open_lock(path: &Path) -> io::Result<fs::File> {
-    fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)
+    match fs::metadata(path) {
+        Ok(found) if found.is_file() => fs::File::open(path),
+        Ok(_) => Err(io::Error::other("the lock is not a regular file")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            match fs::OpenOptions::new().read(true).write(true).create_new(true).open(path) {
+                // (made meanwhile)
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => fs::File::open(path),
+                made => made,
+            }
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]
@@ -1794,7 +1812,7 @@ mod tests {
             }
             tried += 1;
         }
-        assert!(tried >= 9, "the cli-v0.1.2 to 0.1.10 tags");
+        assert!(tried >= 10, "the cli-v0.1.2 to 0.1.11 tags");
     }
     /// Fourth verification, finding 2: a crash at any point of a transaction is ended at the next launch from
     /// its record alone, and that launch starts on one complete set.
@@ -2164,6 +2182,42 @@ mod tests {
         let writer = Locks::of(&linux).unwrap().sessions().unwrap();
         free(&writer);
         assert!(Pin::adopt(&linux, open_lock(&Locks::of(&linux).unwrap().sessions_path()).unwrap()).is_err());
+    }
+
+    /// Eighth verification, blocker: a lock file that is there and cannot be written is held all the same, by the
+    /// launch, by its inheritor and against a change; only one that is missing is made, and nothing but a file is one.
+    #[test]
+    fn a_lock_file_that_cannot_be_written_is_held_all_the_same() {
+        let (_root, linux) = runtime(RELEASE);
+        let release = linux.parent().unwrap();
+        drop(patch().prepared(&linux).unwrap());
+        let library = library_lock(release.parent().unwrap()).unwrap();
+        let folder = library.parent().unwrap();
+        let inode = fs::metadata(&library).unwrap().ino();
+        let locks: Vec<PathBuf> = fs::read_dir(folder).unwrap().map(|entry| entry.unwrap().path()).collect();
+        assert!(locks.len() >= 3, "{locks:?}");
+        for lock in &locks {
+            fs::set_permissions(lock, fs::Permissions::from_mode(0o444)).unwrap();
+        }
+        let (_, pin) = patch().prepared(&linux).unwrap();
+        assert!(Replacing::free(release).unwrap().is_none(), "a change waits for it");
+        let inherited = Pin::adopt(&linux, pin.library.try_clone().unwrap()).unwrap();
+        drop(pin);
+        assert!(Alone::hold(release.parent().unwrap()).unwrap().is_none(), "held still");
+        drop(inherited);
+        drop(Replacing::hold(release).unwrap().unwrap());
+        assert_eq!(fs::metadata(&library).unwrap().ino(), inode, "the same file");
+        assert_eq!(fs::metadata(&library).unwrap().permissions().mode() & 0o777, 0o444);
+        // Made where it is missing; a folder or a link to nothing in its place is none.
+        fs::remove_file(&library).unwrap();
+        drop(patch().prepared(&linux).unwrap());
+        assert!(library.is_file());
+        fs::remove_file(&library).unwrap();
+        fs::create_dir(&library).unwrap();
+        assert_eq!(patch().prepared(&linux).unwrap_err().action, Action::CheckStorage);
+        fs::remove_dir(&library).unwrap();
+        std::os::unix::fs::symlink(folder.join("nothing"), &library).unwrap();
+        assert_eq!(patch().prepared(&linux).unwrap_err().action, Action::CheckStorage);
     }
 
     /// Finding 3 (the verifier's reproduction and its neighbours): a record that parses and is not one this program

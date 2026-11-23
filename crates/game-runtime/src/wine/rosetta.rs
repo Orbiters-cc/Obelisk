@@ -118,9 +118,7 @@ impl Adapter for RosettaWine {
     ) -> Result<Pin, Error> {
         // No file of its runtime changes: the library's lock is enough.
         let pin = admitted.pin()?;
-        if installed(config) {
-            super::whole(config)?;
-        }
+        super::whole(config)?;
         boot(config, &locations.home)?;
         storefront.furnish_prefix(config)?;
         install_prerequisites(config, &locations.home, &storefront.prerequisites_to_run()?)?;
