@@ -1,7 +1,8 @@
 //! The host timeline's variables (`docs/CLI.md`, "The timeline generation"): where the window server and the render server of
 //! the timeline generation record, how much, and what. From this program's own environment, checked, and only when this
 //! process was asked for that generation: the launcher (`launch.sh`) gives them to those two alone. Feature
-//! `developer-timeline` only.
+//! `developer-timeline` only. The window server's switches (`OBELISK_WSD_UPSCALE`, `OBELISK_WSD_PRESENT`) go the same way, with or
+//! without a recording.
 use crate::voile::engine_patch::developer::{Generation, selected};
 use std::path::{Path, PathBuf};
 
@@ -9,19 +10,39 @@ const FOLDER: &str = "OBELISK_TIMELINE";
 /// The others, with what each may be.
 const NUMBERS: [(&str, std::ops::RangeInclusive<u32>); 2] = [("OBELISK_TIMELINE_MB", 1..=8192), ("OBELISK_TIMELINE_PASSES", 0..=1000)];
 
+/// The window server's switches, with what each may be made of.
+const SWITCHES: [(&str, &[&str]); 2] = [("OBELISK_WSD_UPSCALE", &["metalfx"]), ("OBELISK_WSD_PRESENT", &["arrival", "attime", "nosync", "two"])];
+
 /// What the launcher's environment gets; `seen` are the folders the game sees.
 pub(super) fn variables(seen: &[&Path]) -> Vec<(String, String)> {
     if selected() != Generation::Timeline {
         return Vec::new();
     }
     let asked = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
-    match checked(asked(FOLDER).map(PathBuf::from), NUMBERS.map(|(name, _)| asked(name)), seen) {
+    let mut variables = match checked(asked(FOLDER).map(PathBuf::from), NUMBERS.map(|(name, _)| asked(name)), seen) {
         Ok(variables) => variables,
         Err(why) => {
             eprintln!("timeline: nothing is recorded: {why}");
             Vec::new()
         }
+    };
+    match switches(SWITCHES.map(|(name, _)| asked(name))) {
+        Ok(switches) => variables.extend(switches),
+        Err(why) => eprintln!("timeline: the window server has no switch: {why}"),
     }
+    variables
+}
+
+fn switches(values: [Option<String>; 2]) -> Result<Vec<(String, String)>, String> {
+    let mut variables = Vec::new();
+    for ((name, known), value) in SWITCHES.into_iter().zip(values) {
+        let Some(value) = value else { continue };
+        if let Some(other) = value.split(',').find(|part| !known.contains(part)) {
+            return Err(format!("{name}: {other:?} is none of {}", known.join(", ")));
+        }
+        variables.push((name.to_owned(), value));
+    }
+    Ok(variables)
 }
 
 fn checked(folder: Option<PathBuf>, numbers: [Option<String>; 2], seen: &[&Path]) -> Result<Vec<(String, String)>, String> {
@@ -77,6 +98,17 @@ mod tests {
         assert!(ask(&root.path().join("link"), None, None).is_err(), "a link into what the game sees");
         for (mb, passes) in [(Some("0"), None), (Some("8193"), None), (Some("-1"), None), (None, Some("1001")), (None, Some("all")), (None, Some("1; rm"))] {
             assert!(ask(&trace, mb, passes).is_err(), "{mb:?} {passes:?}");
+        }
+    }
+
+    #[test]
+    fn the_window_servers_switches_are_the_known_ones() {
+        let ask = |upscale: Option<&str>, present: Option<&str>| switches([upscale.map(str::to_owned), present.map(str::to_owned)]);
+        assert_eq!(ask(None, None).unwrap(), []);
+        assert_eq!(ask(Some("metalfx"), Some("arrival,two")).unwrap().len(), 2);
+        assert_eq!(ask(None, Some("arrival")).unwrap(), [("OBELISK_WSD_PRESENT".to_owned(), "arrival".to_owned())]);
+        for (upscale, present) in [(Some("fsr"), None), (None, Some("arrival,")), (None, Some("arrival two")), (Some("metalfx;rm"), None)] {
+            assert!(ask(upscale, present).is_err(), "{upscale:?} {present:?}");
         }
     }
 

@@ -42,6 +42,9 @@ unset DYLD_INSERT_LIBRARIES
 # here on, whoever set them, and set again only for those two.
 timeline=${OBELISK_TIMELINE-} timeline_mb=${OBELISK_TIMELINE_MB-} timeline_passes=${OBELISK_TIMELINE_PASSES-}
 unset OBELISK_TIMELINE OBELISK_TIMELINE_MB OBELISK_TIMELINE_PASSES
+# The window server's own switches (developers only, the same way): how it scales and presents a frame. Its alone.
+wsd_upscale=${OBELISK_WSD_UPSCALE-} wsd_present=${OBELISK_WSD_PRESENT-}
+unset OBELISK_WSD_UPSCALE OBELISK_WSD_PRESENT
 if [ -n "$timeline" ]; then
     timeline="$timeline/$(date +%Y%m%d-%H%M%S)-$$"
     mkdir -m 700 "$timeline" || timeline=
@@ -121,13 +124,28 @@ app_name=${app_name//\//-}
 app_id=$(printf '%s' "$app_name" | LC_ALL=C tr -c 'A-Za-z0-9' '-')
 app="$sockets_root/obelisk-apps/$app_id/$app_name.app"
 mkdir -p "$app/Contents/MacOS" || exit 1
-rm -f "$app/Contents/MacOS/wsd"
-cp -c "$runtime/engine/wsd" "$app/Contents/MacOS/wsd" 2>/dev/null || cp "$runtime/engine/wsd" "$app/Contents/MacOS/wsd" || exit 1
+# A bundle that is what it has to be is left alone: macOS registers an app whose bundle changed again, and its Launch
+# Services then writes its whole database, some 12 MB, for each start. A couple of hundred starts in a day passed the 2 GB
+# a day macOS allows it, and the report macOS made of that (spindump) ran for five minutes of a game at half a core (2026-11-23).
+changed=
+if ! cmp -s "$runtime/engine/wsd" "$app/Contents/MacOS/wsd"; then
+    rm -f "$app/Contents/MacOS/wsd"
+    cp -c "$runtime/engine/wsd" "$app/Contents/MacOS/wsd" 2>/dev/null || cp "$runtime/engine/wsd" "$app/Contents/MacOS/wsd" || exit 1
+    changed=1
+fi
 xml_name=$(printf '%s' "$app_name" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
 # macOS turns Game Mode on for a full-screen app of the games category, unless the app says it does not support it.
 game_mode_key=
 [ "$game_mode" = off ] && game_mode_key=$'\n  <key>LSSupportsGameMode</key><false/>'
-cat > "$app/Contents/Info.plist" <<PLIST
+# Writes standard input to the file $1 unless it already holds that; whether it did.
+put_plist() {
+    local plist
+    plist=$(cat)
+    [ -f "$1" ] && [ ! -L "$1" ] && [ "$(cat "$1")" = "$plist" ] && return 1
+    rm -f "$1"
+    printf '%s\n' "$plist" > "$1"
+}
+put_plist "$app/Contents/Info.plist" <<PLIST && changed=1
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -144,7 +162,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 PLIST
 # macOS keeps what it read of a bundle at its first launch, and reads it again only once the bundle's folder has a
 # newer date: with the Info.plist alone rewritten, a game kept the Game Mode of its first launch.
-touch "$app"
+[ -n "$changed" ] && touch "$app"
 
 # The render server runs from a helper bundle inside the game's, one per graphics backend: Metal keeps its compiled
 # shaders per bundle identifier. Outside a bundle every render server shared one cache, and each start of DXMT's arm64
@@ -160,7 +178,7 @@ render_server() {
         rm -f "$server"
         cp -c "$1" "$server" 2>/dev/null || cp "$1" "$server" || return 1
     fi
-    cat > "$helper/Contents/Info.plist" <<PLIST
+    put_plist "$helper/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -192,8 +210,13 @@ if [ -n "$timeline" ]; then
     [ -n "$timeline_mb" ] && export OBELISK_TIMELINE_MB="$timeline_mb"
     [ -n "$timeline_passes" ] && export OBELISK_TIMELINE_PASSES="$timeline_passes"
 fi
+if [ -n "$wsd_upscale$wsd_present" ]; then
+    [ -n "$wsd_upscale" ] && export OBELISK_WSD_UPSCALE="$wsd_upscale"
+    [ -n "$wsd_present" ] && export OBELISK_WSD_PRESENT="$wsd_present"
+fi
 "$app/Contents/MacOS/wsd" --dir "$sockets" ${render_percent:+--render-percent "$render_percent"} 9>&- &
 helpers+=($!)
+unset OBELISK_WSD_UPSCALE OBELISK_WSD_PRESENT
 if [ "$graphics" = d3dmetal ]; then
     # D3DMetal is an Intel library: the Intel render server runs it under Rosetta. d3dmetal-native loads the
     # runtime's D3DMetal, unmodified, from its absolute path. DMN_RESIDENCY_SET=0: the game's buffers are made
