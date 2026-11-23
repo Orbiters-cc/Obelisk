@@ -1385,7 +1385,9 @@ fn a_cloud_question_is_abandoned_after_its_deadline_or_its_observer() {
 }
 
 /// The frames a running game shows, counted from its log as it grows; a log
-/// cut shorter, replaced, or gone ends the count instead of restarting it.
+/// cut shorter, rewritten from its start, replaced, or gone ends the count
+/// instead of restarting it; a log that was not there at the start is never
+/// looked for again (unknown, not 0); the end count comes from the same file.
 #[test]
 fn shown_frames_follow_the_log_and_stop_where_its_continuity_ends() {
     use std::io::Write as _;
@@ -1398,39 +1400,56 @@ fn shown_frames_follow_the_log_and_stop_where_its_continuity_ends() {
     };
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("wine-438100.log");
-    let mut log = ShownLog::new(path.clone());
-    assert_eq!(log.poll(), (0, true), "no log yet: nothing shown, still whole");
+    // M8: not there when the follower began: unknown, and a log made later at its path (an app-wide replacement) is
+    // never taken for it.
+    let mut missing = ShownLog::new(path.clone());
+    assert_eq!(missing.poll(), None, "no log at the start: not known");
     let mut file = fs::File::create(&path).unwrap();
     file.write_all(hud(30).as_bytes()).unwrap();
+    assert_eq!(missing.poll(), None, "never looked for again");
+    assert!(!missing.terminal().measured);
+
+    let mut log = ShownLog::new(path.clone());
     // A line cut where a read ends counts once it is whole.
     let next = hud(20);
     file.write_all(&next.as_bytes()[..10]).unwrap();
-    assert_eq!(log.poll(), (30, true));
+    assert_eq!(log.poll(), Some((30, true)));
     file.write_all(&next.as_bytes()[10..]).unwrap();
     file.write_all(b"wsd: window 1 overlay: frame held 183.3 ms\n").unwrap();
-    assert_eq!(log.poll(), (50, true));
-    assert_eq!(log.poll(), (50, true), "nothing new, nothing more");
+    assert_eq!(log.poll(), Some((50, true)));
+    assert_eq!(log.poll(), Some((50, true)), "nothing new, nothing more");
+    let end = log.terminal();
+    assert!(end.measured && end.count == 50, "{end:?}");
 
     // Cut shorter in place: what follows is not counted from the start.
     file.set_len(10).unwrap();
-    assert_eq!(log.poll(), (50, false));
+    assert_eq!(log.poll(), Some((50, false)));
     file.write_all(hud(100).as_bytes()).unwrap();
-    assert_eq!(log.poll(), (50, false), "the count stays where it was");
+    assert_eq!(log.poll(), Some((50, false)), "the count stays where it was");
+    assert!(!log.terminal().measured, "and the end count is not known");
+
+    // M8: cut and grown again past where it was between two looks: its beginning is not what was read.
+    let path4 = dir.path().join("regrown.log");
+    fs::write(&path4, hud(5)).unwrap();
+    let mut regrown = ShownLog::new(path4.clone());
+    assert_eq!(regrown.poll(), Some((5, true)));
+    let mut again = fs::OpenOptions::new().write(true).truncate(true).open(&path4).unwrap();
+    again.write_all(hud(40).as_bytes()).unwrap();
+    assert_eq!(regrown.poll(), Some((5, false)));
 
     // Replaced at its path (the next start's log): the same.
     let path2 = dir.path().join("other.log");
-    let mut replaced = ShownLog::new(path2.clone());
     fs::write(&path2, hud(5)).unwrap();
-    assert_eq!(replaced.poll(), (5, true));
-    fs::rename(dir.path().join("wine-438100.log"), dir.path().join("old.log")).unwrap();
+    let mut replaced = ShownLog::new(path2.clone());
+    assert_eq!(replaced.poll(), Some((5, true)));
     fs::rename(&path2, dir.path().join("moved.log")).unwrap();
     fs::write(&path2, hud(500)).unwrap();
-    assert_eq!(replaced.poll(), (5, false));
+    assert_eq!(replaced.poll(), Some((5, false)));
     // And gone.
     let path3 = dir.path().join("gone.log");
-    let mut gone = ShownLog::new(path3.clone());
     fs::write(&path3, hud(7)).unwrap();
-    assert_eq!(gone.poll(), (7, true));
+    let mut gone = ShownLog::new(path3.clone());
+    assert_eq!(gone.poll(), Some((7, true)));
     fs::remove_file(&path3).unwrap();
-    assert_eq!(gone.poll(), (7, false));
+    assert_eq!(gone.poll(), Some((7, false)));
 }

@@ -231,6 +231,27 @@ fn no_session() -> GameSessionsState {
 }
 
 /// VRChat's Game session `id` in `phase`, for Gordon.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+}
+
+/// M8: a launch that never saw its own session takes no other launch's end for its own: a session that began before it
+/// was asked for (another launch of the game in the library) is not this one's, and none at all is a failure.
+#[test]
+fn a_session_that_began_before_the_launch_is_never_its_end() {
+    let mut follow = Play::new(VRCHAT, GORDON);
+    let older = GameSessionsState {
+        last: Some(GameSessionState {
+            played: Some(played(Some(0))),
+            started_at: Some(now_secs() - 3600),
+            ..session("someone-else-s", GamePhase::Finished, true)
+        }),
+        ..no_session()
+    };
+    let told = lines(&follow.observe(&idle(), &older, pid, Instant::now()));
+    assert!(!told.iter().any(|l| l.contains("someone-else-s")), "{told:?}");
+}
+
 fn session(id: &str, phase: GamePhase, observed: bool) -> GameSessionState {
     GameSessionState {
         id: id.into(),
@@ -350,7 +371,7 @@ fn a_launch_tells_starting_then_running_with_the_game_s_process_then_its_exit() 
     let finished = GameSessionsState {
         last: Some(GameSessionState {
             played: Some(played(Some(0))),
-            started_at: Some(1_790_000_000),
+            started_at: Some(now_secs()),
             ..session("supervised", GamePhase::Finished, true)
         }),
         ..no_session()
@@ -374,6 +395,7 @@ fn a_game_that_ran_and_exited_between_two_looks_still_tells_its_whole_life() {
     let finished = GameSessionsState {
         last: Some(GameSessionState {
             played: Some(played(Some(3))),
+            started_at: Some(now_secs()),
             ..session("supervised", GamePhase::Finished, true)
         }),
         ..no_session()
@@ -400,7 +422,7 @@ fn the_exit_told_is_the_running_session_s_own_never_another_s() {
     let other = GameSessionsState {
         last: Some(GameSessionState {
             played: Some(played(Some(0))),
-            started_at: Some(1_790_000_000),
+            started_at: Some(now_secs()),
             ..session("someone-else-s", GamePhase::Finished, true)
         }),
         ..no_session()
@@ -428,6 +450,7 @@ fn frames_the_game_s_log_could_not_tell_are_null_not_zero() {
                 frames_measured: false,
                 ..played(Some(0))
             }),
+            started_at: Some(now_secs()),
             ..session("supervised", GamePhase::Finished, true)
         }),
         ..no_session()

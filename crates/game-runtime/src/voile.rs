@@ -138,6 +138,11 @@ pub fn linux_runtime(root: &Path) -> Option<PathBuf> {
     has_engine(&linux).then_some(linux)
 }
 
+/// What each of this build's engine files is in the Linux engine of the Voile in `root`: `voile`, `ours` or `other`.
+pub fn engine_files(root: &Path) -> Option<Vec<(String, &'static str)>> {
+    linux_runtime(root).map(|linux| engine_patch::components(&linux))
+}
+
 /// Which keyboard the games of the Linux engine in `root` get: the layout
 /// selected on the Mac once the Orbiters fork's engine files are in place,
 /// which they are from the first launch on the engine of the release they

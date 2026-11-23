@@ -203,10 +203,13 @@ export FEXDARWIN_LKD=1 FEXDARWIN_ROOT="$runtime/root" FEXDARWIN_ROOT_RO=1 FEXDAR
 export FEXDARWIN_BIND="/opt/wine=$runtime/wine:ro;/home/user=$home;/opt/game=$install;/run/obelisk=$sockets_root/$sockets$binds"
 # wineserver writes the registry only when it exits: wait for it inside the guest before the game ends. Started
 # with -p0, it stops Wine's own processes as soon as the game's last process ends, instead of 3 seconds later.
+# Each of the two waits says when it returned (`obelisk-wait:` lines in the game's log), so that a quit that does not
+# finish shows which one it is stuck in.
 "$runtime/engine/fexdarwin-run" --cwd "$cwd" ${guest_env[@]+"${guest_env[@]}"} \
-    /bin/sh -c '/opt/wine/bin/wineserver -p0; /opt/wine/bin/wine "$@"; status=$?; /opt/wine/bin/wineserver -w; exit $status' sh "$@" &
+    /bin/sh -c '/opt/wine/bin/wineserver -p0; /opt/wine/bin/wine "$@"; status=$?; echo "obelisk-wait: wine returned $status at $(date +%H:%M:%S.%N 2>/dev/null)" >&2; /opt/wine/bin/wineserver -w; echo "obelisk-wait: wineserver -w returned at $(date +%H:%M:%S.%N 2>/dev/null)" >&2; exit $status' sh "$@" &
 game=$!
 wait "$game"
 status=$?
 game=
+echo "obelisk-wait: the game's shell returned $status at $(date +%H:%M:%S) (host)" >&2
 exit "$status"

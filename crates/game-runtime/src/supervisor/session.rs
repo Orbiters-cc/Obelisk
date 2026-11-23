@@ -844,10 +844,9 @@ async fn run<L: Launch>(
         .and_then(|log| follow_shown(session.clone(), log, shown_stop.clone()));
     let began = Instant::now();
     let status = game.exit().await;
+    let ended = crate::boot_clock::now();
     shown_stop.store(true, Ordering::Release);
-    if let Some(shown) = shown {
-        let _ = shown.join();
-    }
+    let shown_log = shown.and_then(|shown| shown.join().ok());
     let seconds = began.elapsed().as_secs();
     let exit = status.code().unwrap_or(-1);
     drop(input);
@@ -862,17 +861,19 @@ async fn run<L: Launch>(
     // read.
     session.forced().await;
     let played = if started {
-        let log = target.log.clone();
-        let frames = tokio::task::spawn_blocking(move || {
-            log.map(|log| crate::metal_hud::read(&log))
-                .unwrap_or_default()
-        })
-        .await
-        .unwrap_or_default();
+        // From the log held since the game began, never the path read again
+        // (another launch may have put its own log there since).
+        let frames = match shown_log {
+            Some(mut log) => tokio::task::spawn_blocking(move || log.terminal())
+                .await
+                .unwrap_or_default(),
+            None => crate::metal_hud::Frames::default(),
+        };
         let wine = session.wine.get().cloned().flatten();
         Some(Played {
             seconds,
             frames,
+            ended,
             exit_code: status.code(),
             exit_signal: std::os::unix::process::ExitStatusExt::signal(&status),
             ended_by_obelisk: session.ended_by_obelisk.load(Ordering::Acquire),
@@ -1143,48 +1144,71 @@ const SHOWN_EVERY: Duration = Duration::from_secs(2);
 const SHOWN_REFRESH: Duration = Duration::from_secs(10);
 
 /// A running game's log, read as it grows for the frames the game shows.
-/// The log is the one at its path when first opened: once it is cut
-/// shorter, replaced at its path, or unreadable, the count stops and is no
-/// longer `continuous`, for frames counted then would not be the game's
-/// since its start.
+/// The log is the one at its path when the session's follower began (the
+/// launch opened it fresh before the game started): held open from then on,
+/// it is the only file counted, live and at the end. Once it is cut shorter,
+/// rewritten from its start, replaced at its path, or unreadable, the count
+/// stops and is no longer `continuous`, for frames counted then would not be
+/// the game's since its start. A log that could not be opened at the start
+/// is never looked for again: its count is unknown, not 0.
 pub(crate) struct ShownLog {
     path: PathBuf,
     file: Option<std::fs::File>,
     read: u64,
     continuous: bool,
     counter: crate::metal_hud::Counter,
+    /// The first bytes read, to tell the same log from one rewritten from its
+    /// start between two looks (cut, then grown past where it was).
+    head: Vec<u8>,
 }
 impl ShownLog {
+    /// Size of the beginning that is checked again at each look.
+    const HEAD: usize = 4096;
+
     pub(crate) fn new(path: PathBuf) -> Self {
+        let file = std::fs::File::open(&path).ok();
         Self {
             path,
-            file: None,
+            file,
             read: 0,
             continuous: true,
             counter: crate::metal_hud::Counter::default(),
+            head: Vec::new(),
         }
+    }
+
+    /// Whether the beginning of the held file is still what was first read.
+    fn same_start(&self) -> bool {
+        use std::os::unix::fs::FileExt;
+        let Some(file) = self.file.as_ref() else { return false };
+        let mut now = vec![0u8; self.head.len()];
+        file.read_exact_at(&mut now, 0).is_ok() && now == self.head
     }
 
     /// Reads what was added since the last look: the frames shown so far,
     /// and whether they are counted from the log's beginning without a gap.
-    pub(crate) fn poll(&mut self) -> (u64, bool) {
+    /// `None` while there is no log to count from (it could not be opened at
+    /// the start): the count is not known, which is not 0.
+    pub(crate) fn poll(&mut self) -> Option<(u64, bool)> {
         use std::os::unix::fs::MetadataExt;
-        if self.continuous && self.file.is_none() {
-            // Not written yet: looked for again next time.
-            self.file = std::fs::File::open(&self.path).ok();
-        }
-        if let Some(file) = self.file.as_mut().filter(|_| self.continuous) {
-            let here = file.metadata().ok();
+        self.file.as_ref()?;
+        if self.continuous {
+            let here = self.file.as_ref().and_then(|f| f.metadata().ok());
             let at_path = std::fs::metadata(&self.path).ok();
             let same = matches!((&here, &at_path),
                 (Some(a), Some(b)) if a.ino() == b.ino() && a.dev() == b.dev());
             match here {
-                Some(meta) if same && meta.len() >= self.read => {
+                Some(meta) if same && meta.len() >= self.read && self.same_start() => {
                     let mut buffer = [0u8; 64 * 1024];
+                    let file = self.file.as_mut().expect("held");
                     loop {
                         match file.read(&mut buffer) {
                             Ok(0) => break,
                             Ok(n) => {
+                                if self.head.len() < Self::HEAD {
+                                    let take = (Self::HEAD - self.head.len()).min(n);
+                                    self.head.extend_from_slice(&buffer[..take]);
+                                }
                                 self.read += n as u64;
                                 self.counter.feed(&buffer[..n]);
                             }
@@ -1198,7 +1222,23 @@ impl ShownLog {
                 _ => self.continuous = false,
             }
         }
-        (self.counter.count(), self.continuous)
+        Some((self.counter.count(), self.continuous))
+    }
+
+    /// The frames the game showed, from this same held log read whole once
+    /// more after the game ended: unknown ([`crate::metal_hud::Frames::measured`]
+    /// false) when there was no log, or it lost its continuity.
+    pub(crate) fn terminal(&mut self) -> crate::metal_hud::Frames {
+        use std::io::Seek as _;
+        let unknown = crate::metal_hud::Frames { measured: false, ..Default::default() };
+        if self.poll().is_none_or(|(_, continuous)| !continuous) {
+            return unknown;
+        }
+        let Some(file) = self.file.as_mut() else { return unknown };
+        if file.seek(std::io::SeekFrom::Start(0)).is_err() {
+            return unknown;
+        }
+        crate::metal_hud::parse(std::io::BufReader::new(&*file)).unwrap_or(unknown)
     }
 }
 
@@ -1208,29 +1248,32 @@ fn follow_shown<P: Provider + 'static>(
     session: Arc<Session<P>>,
     log: PathBuf,
     stop: Arc<AtomicBool>,
-) -> Option<std::thread::JoinHandle<()>> {
+) -> Option<std::thread::JoinHandle<ShownLog>> {
+    // Opened now, before the thread: the session's own log, held for good.
+    let mut log = ShownLog::new(log);
     std::thread::Builder::new()
         .name("shown-frames".into())
         .spawn(move || {
-            let mut log = ShownLog::new(log);
             let mut written: Option<(u64, bool, Instant)> = None;
             while !stop.load(Ordering::Acquire) {
-                let (frames, continuous) = log.poll();
-                let due = written.is_none_or(|(f, c, at)| {
-                    f != frames || c != continuous || at.elapsed() >= SHOWN_REFRESH
-                });
-                if due {
-                    let at = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(0, |d| d.as_secs());
-                    let _ = session.update(|r| {
-                        r.shown = Some(super::Shown {
-                            frames,
-                            at,
-                            continuous,
-                        })
+                // No log to count from: nothing is written, the count stays unknown.
+                if let Some((frames, continuous)) = log.poll() {
+                    let due = written.is_none_or(|(f, c, at)| {
+                        f != frames || c != continuous || at.elapsed() >= SHOWN_REFRESH
                     });
-                    written = Some((frames, continuous, Instant::now()));
+                    if due {
+                        let at = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_secs());
+                        let _ = session.update(|r| {
+                            r.shown = Some(super::Shown {
+                                frames,
+                                at,
+                                continuous,
+                            })
+                        });
+                        written = Some((frames, continuous, Instant::now()));
+                    }
                 }
                 let mut waited = Duration::ZERO;
                 while waited < SHOWN_EVERY && !stop.load(Ordering::Acquire) {
@@ -1238,6 +1281,7 @@ fn follow_shown<P: Provider + 'static>(
                     waited += Duration::from_millis(100);
                 }
             }
+            log
         })
         .ok()
 }

@@ -209,8 +209,11 @@ pub struct Play {
     throttle: Throttle,
     starting: bool,
     running: bool,
-    /// The Game session seen running: only its own record says how it ended.
+    /// This launch's own Game session, from the first time it is seen (admitted, before it runs): only its own record
+    /// says how it ended.
     session: Option<String>,
+    /// When this launch was asked for (seconds since 1970): a session that began before it is never this launch's.
+    admitted_at: u64,
     /// The session and release of the Voile offer already taken.
     voile: Option<(String, String)>,
     rosetta: Option<u64>,
@@ -230,6 +233,7 @@ impl Play {
             starting: false,
             running: false,
             session: None,
+            admitted_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()),
             voile: None,
             rosetta: None,
             cloud: None,
@@ -263,6 +267,10 @@ impl Play {
             steps.push(PlayStep::Tell(event));
         }
         if let Some(active) = sessions.active.as_ref().filter(|active| self.ours(active)) {
+            // This launch's session from the first sight of it, whatever phase it is in.
+            if self.session.is_none() && active.started_at.is_none_or(|at| at + 2 >= self.admitted_at) {
+                self.session = Some(active.id.clone());
+            }
             if let Some(install) = active.runtime_install {
                 let phase = match install.component {
                     RuntimeComponent::Voile => "voile",
@@ -377,7 +385,11 @@ impl Play {
         let last = sessions.last.as_ref().filter(|last| {
             self.ours(last)
                 && last.observed
-                && self.session.as_ref().is_none_or(|id| *id == last.id)
+                && match &self.session {
+                    Some(id) => *id == last.id,
+                    // Never seen: only a session that began after this launch was asked for can be its.
+                    None => last.started_at.is_some_and(|at| at + 2 >= self.admitted_at),
+                }
         });
         let played = last.and_then(|last| last.played.as_ref());
         let ran =

@@ -131,6 +131,11 @@ pub trait Provider: Clone + std::fmt::Debug + PartialEq + Eq + Send + Sync + 'st
 pub struct Played {
     pub seconds: u64,
     pub frames: crate::metal_hud::Frames,
+    /// When the game ended on the clock since the Mac booted (its boot's
+    /// session UUID and seconds since it, sleep counted): a wall clock set
+    /// forward or back never moves it. Absent in older records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended: Option<crate::boot_clock::BootInstant>,
     /// Absent when a signal ended the game.
     pub exit_code: Option<i32>,
     pub exit_signal: Option<i32>,

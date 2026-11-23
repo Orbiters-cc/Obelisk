@@ -61,6 +61,17 @@ pub struct Voile {
     /// Which keyboard the games of the Linux engine get: `mac`, `pending`
     /// or `us`. None without a Linux engine.
     pub keyboard_layout: Option<&'static str>,
+    /// Each engine file of this build, by its path in the Linux engine, and
+    /// what is there now: `voile`, `ours` or `other`. None without a Linux
+    /// engine.
+    pub engine_files: Option<Vec<EngineFile>>,
+}
+
+/// One engine file of this build in the Linux engine.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct EngineFile {
+    pub path: String,
+    pub state: &'static str,
 }
 
 /// One way Steam offers to confirm a sign-in.

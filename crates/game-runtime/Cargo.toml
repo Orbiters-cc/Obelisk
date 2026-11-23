@@ -27,6 +27,8 @@ cloud-vault.workspace = true
 epic-kit.workspace = true
 gog-kit.workspace = true
 obelisk-core.workspace = true
+# The clock since the Mac booted, sleep counted (`boot_clock`).
+rustix = { version = "1", features = ["time"] }
 
 [dev-dependencies]
 sha1.workspace = true

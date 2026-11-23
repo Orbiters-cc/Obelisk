@@ -108,6 +108,9 @@ fn status(places: &Places, store: &dyn CredentialStore) -> Event {
             prereleases: game_runtime::voile::takes_prereleases(Path::new(&locations.voile)),
             keyboard_layout: game_runtime::voile::keyboard(Path::new(&locations.voile))
                 .map(game_runtime::voile::engine_patch::Keyboard::name),
+            engine_files: game_runtime::voile::engine_files(Path::new(&locations.voile)).map(|files| {
+                files.into_iter().map(|(path, state)| events::EngineFile { path, state }).collect()
+            }),
             installed: obelisk_bridge::installed_voile_release(locations),
         },
         helpers: places.helpers(),

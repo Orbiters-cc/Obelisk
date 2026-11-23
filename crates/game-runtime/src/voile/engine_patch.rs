@@ -13,11 +13,12 @@
 //! They are built for one release and go over that release only, and only
 //! over the files it shipped, told by their SHA-256: any other release, a
 //! development runtime, or a file that is neither Voile's nor ours is left
-//! as it is, and its games run as Voile ships them. Each file runs with the
-//! others' originals (the window server and the driver share their protocol
-//! with Voile's, the render server is a program of its own): a patch
-//! interrupted between its files leaves an engine that starts, and the next
-//! launch completes it.
+//! as it is, and its games run as Voile ships them. The files go in as one:
+//! under a lock of the runtime, every file is written and checked beside the
+//! one it replaces first, each original is kept aside, then all are switched;
+//! a switch that fails part way puts the originals back, and one a crash cut
+//! short is undone at the next launch before anything else. A runtime is
+//! never left with some of our files and some of Voile's by this program.
 use serde::Deserialize;
 use std::{fs, io::Write, os::unix::fs::PermissionsExt, path::Path, sync::OnceLock};
 
@@ -142,40 +143,147 @@ impl Patch {
         }
     }
 
-    /// Puts our files over the release's own in `linux`, when every one of
-    /// them is the release's or already ours. Each goes in whole or not at
-    /// all: written beside the file it replaces, then renamed over it, which
-    /// leaves a running game the file it started with.
+    /// What each file of the runtime is, as `status` tells it: `voile`,
+    /// `ours` or `other`, by its path in the runtime.
+    fn components(&self, linux: &Path) -> Vec<(String, &'static str)> {
+        self.files
+            .iter()
+            .zip(self.found(linux))
+            .map(|(file, found)| {
+                let state = match found {
+                    Found::Original => "voile",
+                    Found::Patched => "ours",
+                    Found::Other => "other",
+                };
+                (file.path.clone(), state)
+            })
+            .collect()
+    }
+
+    /// Puts our files over the release's own in `linux`, all of them or none,
+    /// when every one of them is the release's or already ours.
     fn apply(&self, linux: &Path) -> Keyboard {
+        self.apply_failing_at(linux, None)
+    }
+
+    /// [`Patch::apply`], with the switch of file `fail_at` failing (a test's).
+    fn apply_failing_at(&self, linux: &Path, fail_at: Option<usize>) -> Keyboard {
+        let Ok(_lock) = lock(linux) else { return self.keyboard(linux) };
+        // A switch a crash cut short is undone first: the originals kept aside go back.
+        restore(self, linux);
+        // One look, under the lock: what it sees is what is changed.
         if self.keyboard(linux) != Keyboard::Pending {
             return self.keyboard(linux);
         }
-        for (file, found) in self.files.iter().zip(self.found(linux)) {
-            if found == Found::Original && replace(&linux.join(&file.path), file.bytes).is_err() {
-                break;
+        let found = self.found(linux);
+        let mut staged = Vec::new();
+        for (file, found) in self.files.iter().zip(found) {
+            if found != Found::Original {
+                continue;
             }
+            match stage(&linux.join(&file.path), file.bytes, &file.patched) {
+                Ok(temp) => staged.push((file, temp)),
+                // Nothing switched yet: the staged files go with their temporaries.
+                Err(_) => return self.keyboard(linux),
+            }
+        }
+        // Each original kept aside, then all switched.
+        let mut kept = Vec::new();
+        for (file, _) in &staged {
+            let path = linux.join(&file.path);
+            let aside = aside_of(&path);
+            if fs::hard_link(&path, &aside).is_err() {
+                undo(&kept);
+                return self.keyboard(linux);
+            }
+            kept.push((path, aside));
+        }
+        let mut switched = Vec::new();
+        for (index, (file, temp)) in staged.into_iter().enumerate() {
+            let path = linux.join(&file.path);
+            let done = if fail_at == Some(index) {
+                Err(std::io::Error::other("a test's failure"))
+            } else {
+                temp.persist(&path).map(|_| ()).map_err(|failed| failed.error)
+            };
+            if done.is_err() {
+                undo(&kept);
+                return self.keyboard(linux);
+            }
+            switched.push(path);
+        }
+        for (_, aside) in &kept {
+            let _ = fs::remove_file(aside);
         }
         self.keyboard(linux)
     }
 }
 
-fn replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+/// Where the original of `path` is kept during a switch.
+fn aside_of(path: &Path) -> std::path::PathBuf {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    path.with_file_name(format!(".obelisk-original-{name}"))
+}
+
+/// Puts back every original kept aside in `kept`.
+fn undo(kept: &[(std::path::PathBuf, std::path::PathBuf)]) {
+    for (path, aside) in kept {
+        put_back(path, aside);
+    }
+}
+
+/// The original kept at `aside` goes back to `path`; when `path` is that same file still (it was never switched),
+/// the second name goes (a rename between two names of one file does nothing).
+fn put_back(path: &Path, aside: &Path) {
+    use std::os::unix::fs::MetadataExt;
+    let same = matches!((fs::metadata(path), fs::metadata(aside)), (Ok(a), Ok(b)) if (a.dev(), a.ino()) == (b.dev(), b.ino()));
+    if same {
+        let _ = fs::remove_file(aside);
+    } else {
+        let _ = fs::rename(aside, path);
+    }
+}
+
+/// Undoes a switch a crash cut short: every original still kept aside goes back.
+fn restore(patch: &Patch, linux: &Path) {
+    for file in &patch.files {
+        let path = linux.join(&file.path);
+        let aside = aside_of(&path);
+        if aside.is_file() {
+            put_back(&path, &aside);
+        }
+    }
+}
+
+/// The runtime's lock for its engine files, held while the file lives.
+fn lock(linux: &Path) -> std::io::Result<fs::File> {
+    let file = fs::OpenOptions::new().create(true).truncate(false).write(true).open(linux.join(".obelisk-engine-patch.lock"))?;
+    file.lock()?;
+    Ok(file)
+}
+
+/// Our file written beside `path` with its mode, checked against `sha` before anything is switched.
+fn stage(path: &Path, bytes: &[u8], sha: &str) -> std::io::Result<tempfile::NamedTempFile> {
     let folder = path.parent().ok_or(std::io::ErrorKind::NotFound)?;
     let mode = fs::metadata(path)?.permissions().mode();
-    let mut file = tempfile::Builder::new()
-        .prefix(".obelisk-")
-        .tempfile_in(folder)?;
+    let mut file = tempfile::Builder::new().prefix(".obelisk-").tempfile_in(folder)?;
     file.write_all(bytes)?;
-    file.as_file()
-        .set_permissions(fs::Permissions::from_mode(mode))?;
+    file.as_file().set_permissions(fs::Permissions::from_mode(mode))?;
     file.as_file().sync_all()?;
-    file.persist(path).map_err(|failed| failed.error)?;
-    Ok(())
+    if crate::sha(file.path()).ok().as_deref() != Some(sha) {
+        return Err(std::io::Error::other("the staged file is not ours"));
+    }
+    Ok(file)
 }
 
 /// Which keyboard the games of the Linux engine runtime `linux` get.
 pub fn keyboard(linux: &Path) -> Keyboard {
     built_in().keyboard(linux)
+}
+
+/// What each engine file of the runtime `linux` is (`voile`, `ours`, `other`), by its path in the runtime.
+pub fn components(linux: &Path) -> Vec<(String, &'static str)> {
+    built_in().components(linux)
 }
 
 /// Puts our engine files in place in `linux` when they are for its release,
@@ -272,6 +380,7 @@ mod tests {
             .flatten()
             .collect();
         assert_eq!(left.len(), 1);
+        assert!(!linux.join(".obelisk-original-wsd").exists());
         // And a second launch finds them in place.
         assert_eq!(patch().apply(&linux), Keyboard::Mac);
         assert_eq!(patch().keyboard(&linux), Keyboard::Mac);
@@ -304,6 +413,43 @@ mod tests {
         assert_eq!(patch().apply(&linux), Keyboard::Us);
         assert!(!linux.join(WSD).exists());
         assert_eq!(fs::read(linux.join(DRIVER)).unwrap(), b"voile's driver");
+    }
+
+    /// M12: a switch that fails part way puts every original back: never some of ours beside some of Voile's.
+    #[test]
+    fn a_switch_that_fails_part_way_leaves_voile_s_files_whole() {
+        let (_root, linux) = runtime(RELEASE);
+        assert_eq!(patch().apply_failing_at(&linux, Some(1)), Keyboard::Pending);
+        assert_eq!(fs::read(linux.join(WSD)).unwrap(), b"voile's wsd", "the first one switched back");
+        assert_eq!(fs::read(linux.join(DRIVER)).unwrap(), b"voile's driver");
+        assert_eq!(fs::read(linux.join(SERVER)).unwrap(), b"voile's server");
+        assert!(patch().components(&linux).iter().all(|(_, state)| *state == "voile"));
+        assert_eq!(patch().apply(&linux), Keyboard::Mac, "the next launch puts all of them in");
+        assert!(patch().components(&linux).iter().all(|(_, state)| *state == "ours"));
+    }
+
+    /// M12: a crash between the switches leaves the originals kept aside: the next launch puts them back first, then
+    /// switches all at once.
+    #[test]
+    fn a_switch_a_crash_cut_short_is_undone_first() {
+        let (_root, linux) = runtime(RELEASE);
+        fs::hard_link(linux.join(WSD), aside_of(&linux.join(WSD))).unwrap();
+        fs::write(linux.join(WSD).with_extension("tmp"), b"our wsd").unwrap();
+        fs::rename(linux.join(WSD).with_extension("tmp"), linux.join(WSD)).unwrap();
+        assert_eq!(patch().components(&linux)[0].1, "ours", "half switched");
+        assert_eq!(patch().apply(&linux), Keyboard::Mac);
+        assert!(!aside_of(&linux.join(WSD)).exists());
+        assert_eq!(fs::read(linux.join(DRIVER)).unwrap(), b"our driver");
+    }
+
+    /// M12: a mixed installation says which file is which.
+    #[test]
+    fn a_mixed_installation_says_each_file_s_state() {
+        let (_root, linux) = runtime(RELEASE);
+        fs::write(linux.join(WSD), b"our wsd").unwrap();
+        fs::write(linux.join(SERVER), b"someone else's server").unwrap();
+        assert_eq!(patch().keyboard(&linux), Keyboard::Us);
+        assert_eq!(patch().components(&linux), [(WSD.to_owned(), "ours"), (DRIVER.to_owned(), "voile"), (SERVER.to_owned(), "other")]);
     }
 
     #[test]

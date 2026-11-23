@@ -90,7 +90,7 @@ pub fn without_frame_lines(text: &str) -> String {
         .join("\n")
 }
 
-fn parse(log: impl BufRead) -> io::Result<Frames> {
+pub(crate) fn parse(log: impl BufRead) -> io::Result<Frames> {
     // Present intervals in ms, per process: a game's launcher may present too.
     let mut intervals: HashMap<u32, Vec<f32>> = HashMap::new();
     for line in log.split(b'\n') {
