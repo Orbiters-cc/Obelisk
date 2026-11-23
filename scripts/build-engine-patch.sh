@@ -6,14 +6,20 @@
 #   wineobelisk.so              the unix side of voile-wine's wineobelisk.drv, which makes the Windows layout of it
 #   virgl_render_server         Neptune's render server for arm64 (DXMT), which takes a resource update up to 1 GiB
 #   virgl_render_server-x86_64  the same for x86_64 (D3DMetal, under Rosetta)
-#   manifest.json               the release, the sources' commits, and each file's SHA-256 before and after
+#   fexdarwin-run               voile-lkd's engine (FEXCore and LKD), whose ptrace never turns an attach's SIGSTOP into
+#                               a stop of the whole game (the 2026-11-23 VRChat hang)
+#   manifest.json               the release, the sources' commits, and each file's SHA-256 before and after, with every
+#                               SHA-256 an earlier version of this manifest had for that file (its "previous"), so that
+#                               a player's files from an earlier obelisk-cli are replaced too
 #
-#   [VOILE_LKD=<checkout of Orbiters-cc/voile-lkd, branch orbiters>] \
+#   [VOILE_LKD=<checkout of Orbiters-cc/voile-lkd, branch orbiters> FEX=<checkout of Zagrios/FEX at the release's fex
+#    commit, with its submodules>]   (cmake and ninja on PATH) \
 #   [VOILE_WINE=<checkout of Orbiters-cc/voile-wine, branch orbiters> ZIG=<zig 0.16.0, the one Voile's sources.json names>] \
 #   [NEPTUNE=<checkout of Orbiters-cc/neptune, branch orbiters>]   (meson, ninja and pkg-config on PATH) \
 #   scripts/build-engine-patch.sh <installed Voile release folder, such as .../Voile/v26.3.0-27.beta1>
 #
-# Each part is built when its checkout is given (wsd needs VOILE_LKD and VOILE_WINE, which share wsd_protocol.h);
+# Each part is built when its checkout is given (wsd and fexdarwin-run from VOILE_LKD; the driver from VOILE_WINE: a wsd
+# built without it must keep the wsd_protocol.h the checked-in driver was built with);
 # a part not given keeps the file already checked in, which must be the one the manifest names. The patch is for
 # that release only. Its runtime.json names the commits it was built from: each checkout must be those commits plus
 # our own, and the files it replaces must be the release's own.
@@ -41,15 +47,15 @@ WSD="engine/wsd"
 DRIVER="wine/lib/wine/x86_64-unix/wineobelisk.so"
 SERVER="graphics/libexec/virgl_render_server"
 SERVER_X86="graphics/x86_64/libexec/virgl_render_server"
-[[ -f "$LINUX/$WSD" && -f "$LINUX/$DRIVER" && -f "$LINUX/$SERVER" && -f "$LINUX/$SERVER_X86" ]] ||
+FEXDARWIN="engine/fexdarwin-run"
+[[ -f "$LINUX/$WSD" && -f "$LINUX/$DRIVER" && -f "$LINUX/$SERVER" && -f "$LINUX/$SERVER_X86" && -f "$LINUX/$FEXDARWIN" ]] ||
     fail "$RELEASE_DIR is not a Voile release with the Linux engine."
 sha() { /usr/bin/shasum -a 256 "$1" | cut -d' ' -f1; }
 for CHECKOUT in "${VOILE_LKD:-}" "${VOILE_WINE:-}" "${NEPTUNE:-}"; do
     [[ -z "$CHECKOUT" || -z "$(git -C "$CHECKOUT" status --porcelain)" ]] ||
         fail "$CHECKOUT has changes that are not committed."
 done
-if [[ -n "${VOILE_LKD:-}" || -n "${VOILE_WINE:-}" ]]; then
-    [[ -n "${VOILE_LKD:-}" && -n "${VOILE_WINE:-}" ]] || fail "wsd and the driver are built together: set VOILE_LKD and VOILE_WINE."
+if [[ -n "${VOILE_WINE:-}" ]]; then
     : "${ZIG:?set ZIG to zig 0.16.0}"
     [[ "$("$ZIG" version)" == 0.16.0 ]] || fail "Voile builds its Linux Wine with zig 0.16.0."
 fi
@@ -76,16 +82,22 @@ kept_source() { /usr/bin/python3 -c 'import json,sys
 m=json.load(open(sys.argv[1])); s=m["sources"].get(sys.argv[2])
 print(json.dumps(s).replace("{", "{ ").replace("}", " }") if s else "")' "$OUT/manifest.json" "$1" 2>/dev/null || true; }
 
-# --- wsd and the driver -------------------------------------------------------------------------------------------
-if [[ -n "${VOILE_LKD:-}" ]]; then
-    LKD_BASE="$(field linux.voile-lkd)"
+# A thin Mach-O's SHA-256 with its LC_UUID zeroed and its code signature cut, and its length so cut.
+normal() { /usr/bin/python3 -I -c 'import hashlib,struct,sys
+d=bytearray(open(sys.argv[1],"rb").read())
+magic,_,_,_,ncmds,_,_,_=struct.unpack_from("<IiiIIIII",d,0)
+assert magic==0xFEEDFACF, "not a thin 64-bit Mach-O"
+off,end=32,len(d)
+for _ in range(ncmds):
+    cmd,size=struct.unpack_from("<II",d,off)
+    if cmd==0x1B: d[off+8:off+24]=bytes(16)
+    if cmd==0x1D: end=struct.unpack_from("<I",d,off+8)[0]
+    off+=size
+print(hashlib.sha256(d[:end]).hexdigest(),end)' "$1"; }
+# --- the driver ---------------------------------------------------------------------------------------------------
+if [[ -n "${VOILE_WINE:-}" ]]; then
     WINE_BASE="$(field voile-wine)"
-    based_on "$VOILE_LKD" "$LKD_BASE" || fail "$VOILE_LKD is not built on voile-lkd $LKD_BASE, which $RELEASE holds."
     based_on "$VOILE_WINE" "$WINE_BASE" || fail "$VOILE_WINE is not built on voile-wine $WINE_BASE, which $RELEASE holds."
-    # Between the release's commit and ours, nothing but the keyboard layout's files may differ: the patch replaces
-    # these files and must not carry a change that needs another.
-    others="$(git -C "$VOILE_LKD" diff --name-only "$LKD_BASE" HEAD -- . ':!wsd' ':!tests' ':!README.md' ':!docs')"
-    [[ -z "$others" ]] || fail "voile-lkd changed outside wsd since $RELEASE: $others"
     others="$(git -C "$VOILE_WINE" diff --name-only "$WINE_BASE" HEAD -- . ':!dlls/wineobelisk.drv' ':!README.md')"
     [[ -z "$others" ]] || fail "voile-wine changed outside wineobelisk.drv since $RELEASE: $others"
     others="$(git -C "$VOILE_WINE" diff --name-only "$WINE_BASE" HEAD -- dlls/wineobelisk.drv/dllmain.c dlls/wineobelisk.drv/unixlib.h)"
@@ -127,6 +139,27 @@ if [[ -n "${VOILE_LKD:-}" ]]; then
 
     echo "==> wineobelisk.so"
     build_driver "$VOILE_WINE/dlls/wineobelisk.drv" "$WORK/driver"
+    cp "$WORK/driver/wineobelisk.so" "$WORK/out/wineobelisk.so"
+    BUILT="$BUILT wineobelisk.so"
+    SOURCE_WINE="{ \"repository\": \"https://github.com/Orbiters-cc/voile-wine\", \"commit\": \"$(git -C "$VOILE_WINE" rev-parse HEAD)\", \"base\": \"$WINE_BASE\", \"license\": \"LGPL-2.1-or-later\" }"
+else
+    [[ -n "$(kept wineobelisk.so)" ]] || fail "No wineobelisk.so of $RELEASE is checked in: set VOILE_WINE and ZIG."
+    cp "$OUT/wineobelisk.so" "$WORK/out/wineobelisk.so"
+    SOURCE_WINE="$(kept_source voile-wine)"
+fi
+
+# --- wsd and fexdarwin-run ----------------------------------------------------------------------------------------
+if [[ -n "${VOILE_LKD:-}" ]]; then
+    LKD_BASE="$(field linux.voile-lkd)"
+    based_on "$VOILE_LKD" "$LKD_BASE" || fail "$VOILE_LKD is not built on voile-lkd $LKD_BASE, which $RELEASE holds."
+    # Between the release's commit and ours, nothing but the keyboard layout's files may differ: the patch replaces
+    # these files and must not carry a change that needs another.
+    others="$(git -C "$VOILE_LKD" diff --name-only "$LKD_BASE" HEAD -- . ':!wsd' ':!lkd' ':!fexdarwin' ':!tests' ':!README.md' ':!docs')"
+    [[ -z "$others" ]] || fail "voile-lkd changed outside wsd and fexdarwin-run's sources since $RELEASE: $others"
+    [[ "$(git -C "$VOILE_LKD" rev-parse HEAD:fex)" == "$(field linux.fex)" ]] || fail "voile-lkd's fex is not the release's FEX."
+    : "${FEX:?set FEX to a checkout of Zagrios/FEX at the fex commit of the release, with its submodules}"
+    [[ "$(git -C "$FEX" rev-parse HEAD)" == "$(field linux.fex)" && -z "$(git -C "$FEX" status --porcelain)" ]] ||
+        fail "$FEX is not FEX $(field linux.fex) as committed."
     echo "==> wsd"
     # As voile-lkd's wsd/build.sh and Voile's build-linux.sh: for the macOS the release's wsd runs on, without debug
     # information, signed ad hoc.
@@ -136,35 +169,75 @@ if [[ -n "${VOILE_LKD:-}" ]]; then
         -framework AudioToolbox -framework CoreAudio -framework IOKit
     strip -S "$WORK/wsd"
     codesign --force --sign - --identifier wsd "$WORK/wsd" 2>/dev/null
-    cmp -s "$VOILE_LKD/wsd/wsd_protocol.h" "$VOILE_WINE/dlls/wineobelisk.drv/wsd_protocol.h" ||
-        fail "wsd and the driver do not share one wsd_protocol.h."
+    if [[ -n "${VOILE_WINE:-}" ]]; then
+        cmp -s "$VOILE_LKD/wsd/wsd_protocol.h" "$VOILE_WINE/dlls/wineobelisk.drv/wsd_protocol.h" ||
+            fail "wsd and the driver do not share one wsd_protocol.h."
+    else
+        # the driver kept was built with the protocol of the voile-lkd commit the manifest names
+        kept_lkd="$(/usr/bin/python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["sources"]["voile-lkd"]["commit"])' "$OUT/manifest.json")"
+        git -C "$VOILE_LKD" diff --quiet "$kept_lkd" HEAD -- wsd/wsd_protocol.h ||
+            fail "wsd_protocol.h changed since $kept_lkd: rebuild the driver too (VOILE_WINE)."
+    fi
     cp "$WORK/wsd" "$WORK/out/wsd"
-    cp "$WORK/driver/wineobelisk.so" "$WORK/out/wineobelisk.so"
-    BUILT="$BUILT wsd wineobelisk.so"
+    BUILT="$BUILT wsd"
+
+    # fexdarwin-run as Voile's build-linux.sh builds it (voile-lkd's build: lkd, then fexdarwin/scripts/build.sh;
+    # MACOSX_DEPLOYMENT_TARGET 26.0, stripped, signed ad hoc), with FEX's own libraries rather than any Homebrew
+    # installed (the release's builder had none; FEX's configure takes fmt and others from Homebrew when found).
+    # Compared but for LC_UUID and the ad hoc signature, like the render servers.
+    build_fexdarwin() {
+        local tree="$1" out="$2" b1 commit
+        b1="$tree/fexdarwin/build/fexcore"
+        commit="$(git -C "$FEX" rev-parse HEAD)"
+        rm -rf "$tree/fexdarwin/build" "$tree/lkd/build"
+        (
+            export MACOSX_DEPLOYMENT_TARGET=26.0 JOBS=4
+            "$tree/lkd/build.sh" lkd >/dev/null
+            cmake -G Ninja -S "$FEX" -B "$b1" -DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew \
+                -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=/usr/bin/clang -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
+                -DENABLE_LTO=OFF -DENABLE_FEX_ALLOCATOR=OFF -DENABLE_JEMALLOC_GLIBC_ALLOC=OFF \
+                -DBUILD_TESTING=OFF -DBUILD_THUNKS=OFF -DBUILD_FEXCONFIG=OFF -DENABLE_CCACHE=OFF \
+                -DENABLE_GDB_SYMBOLS=OFF -DENABLE_ASSERTIONS=OFF -DENABLE_OFFLINE_TELEMETRY=OFF \
+                -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+                -DOVERRIDE_VERSION="FEX-${commit:0:9}-darwin" -DOVERRIDE_HASH="$commit" >/dev/null
+            FEX_SRC="$FEX" "$tree/fexdarwin/scripts/build.sh" >/dev/null
+        )
+        # Signed under its own name, as Voile signs it: an ad hoc signature names the file it was made for (and its
+        # length sets the sizes in the load commands).
+        local signed="$tree/fexdarwin/build/signed/fexdarwin-run"
+        mkdir -p "$(dirname "$signed")"
+        cp "$tree/fexdarwin/build/host/fexdarwin-run" "$signed"
+        codesign --remove-signature "$signed" 2>/dev/null || true
+        strip -S "$signed"
+        codesign --sign - "$signed" 2>/dev/null
+        cp "$signed" "$out"
+    }
+    echo "==> the release's own fexdarwin-run, to check the toolchain"
+    git -C "$VOILE_LKD" worktree add -q --detach "$WORK/lkd-base" "$LKD_BASE"
+    git -C "$VOILE_LKD" worktree add -q --detach "$WORK/lkd-ours" HEAD
+    trap 'git -C "$VOILE_LKD" worktree remove --force "$WORK/lkd-base" 2>/dev/null; git -C "$VOILE_LKD" worktree remove --force "$WORK/lkd-ours" 2>/dev/null; [ -n "${KEEP_WORK:-}" ] || rm -rf "$WORK"' EXIT
+    build_fexdarwin "$WORK/lkd-base" "$WORK/base-fexdarwin-run"
+    [[ "$(normal "$WORK/base-fexdarwin-run")" == "$(normal "$LINUX/$FEXDARWIN")" ]] ||
+        fail "This toolchain does not rebuild the fexdarwin-run $RELEASE ships: no patch written."
+    echo "==> fexdarwin-run"
+    build_fexdarwin "$WORK/lkd-ours" "$WORK/out/fexdarwin-run"
+    # LKD's own tests of what changed (ptrace and signals), on the sources just built.
+    "$WORK/lkd-ours/lkd/build.sh" >/dev/null
+    for test in "$WORK/lkd-ours/lkd/build/tests/"test_ptrace_* "$WORK/lkd-ours/lkd/build/tests/"test_sig_*; do
+        case "$test" in *.log|*.dSYM) continue;; esac
+        "$WORK/lkd-ours/lkd/tools/runtest.sh" 300 "$test" >"$test.log" 2>&1 || fail "LKD's $(basename "$test") failed: no patch written."
+    done
+    BUILT="$BUILT fexdarwin-run"
     SOURCE_LKD="{ \"repository\": \"https://github.com/Orbiters-cc/voile-lkd\", \"commit\": \"$(git -C "$VOILE_LKD" rev-parse HEAD)\", \"base\": \"$LKD_BASE\", \"license\": \"GPL-3.0-only\" }"
-    SOURCE_WINE="{ \"repository\": \"https://github.com/Orbiters-cc/voile-wine\", \"commit\": \"$(git -C "$VOILE_WINE" rev-parse HEAD)\", \"base\": \"$WINE_BASE\", \"license\": \"LGPL-2.1-or-later\" }"
 else
-    for source in wsd wineobelisk.so; do
-        [[ -n "$(kept "$source")" ]] || fail "No $source of $RELEASE is checked in: set VOILE_LKD, VOILE_WINE and ZIG."
+    for source in wsd fexdarwin-run; do
+        [[ -n "$(kept "$source")" ]] || fail "No $source of $RELEASE is checked in: set VOILE_LKD and FEX."
         cp "$OUT/$source" "$WORK/out/$source"
     done
     SOURCE_LKD="$(kept_source voile-lkd)"
-    SOURCE_WINE="$(kept_source voile-wine)"
 fi
 
 # --- Neptune's render servers -------------------------------------------------------------------------------------
-# A thin Mach-O's SHA-256 with its LC_UUID zeroed and its code signature cut, and its length so cut.
-normal() { /usr/bin/python3 -I -c 'import hashlib,struct,sys
-d=bytearray(open(sys.argv[1],"rb").read())
-magic,_,_,_,ncmds,_,_,_=struct.unpack_from("<IiiIIIII",d,0)
-assert magic==0xFEEDFACF, "not a thin 64-bit Mach-O"
-off,end=32,len(d)
-for _ in range(ncmds):
-    cmd,size=struct.unpack_from("<II",d,off)
-    if cmd==0x1B: d[off+8:off+24]=bytes(16)
-    if cmd==0x1D: end=struct.unpack_from("<I",d,off+8)[0]
-    off+=size
-print(hashlib.sha256(d[:end]).hexdigest(),end)' "$1"; }
 if [[ -n "${NEPTUNE:-}" ]]; then
     NEPTUNE_BASE="$(field linux.neptune)"
     based_on "$NEPTUNE" "$NEPTUNE_BASE" || fail "$NEPTUNE is not built on neptune $NEPTUNE_BASE, which $RELEASE holds."
@@ -242,7 +315,7 @@ EOF
     echo "==> the release's own render servers, to check the toolchain"
     EPOXY_ROOT="$(mktemp -d /private/tmp/epoxy.XXXXXX)"
     git -C "$NEPTUNE" worktree add -q --detach "$WORK/neptune-base" "$NEPTUNE_BASE"
-    trap 'git -C "$NEPTUNE" worktree remove --force "$WORK/neptune-base" 2>/dev/null; rm -rf "$EPOXY_ROOT"; [ -n "${KEEP_WORK:-}" ] || rm -rf "$WORK"' EXIT
+    trap 'git -C "$NEPTUNE" worktree remove --force "$WORK/neptune-base" 2>/dev/null; rm -rf "$EPOXY_ROOT"; [ -n "${VOILE_LKD:-}" ] && { git -C "$VOILE_LKD" worktree remove --force "$WORK/lkd-base"; git -C "$VOILE_LKD" worktree remove --force "$WORK/lkd-ours"; } 2>/dev/null; [ -n "${KEEP_WORK:-}" ] || rm -rf "$WORK"' EXIT
     for arch in arm64 x86_64; do
         shipped="$LINUX/$SERVER"; [[ "$arch" == x86_64 ]] && shipped="$LINUX/$SERVER_X86"
         build_server "$WORK/neptune-base/virglrenderer" "$arch" "$shipped" "$WORK/base-server-$arch"
@@ -270,34 +343,58 @@ rm -rf "$OUT"
 mkdir -p "$OUT"
 cp "$WORK/out/"* "$OUT/"
 cp "$WORK/manifest.kept.json" "$OUT/manifest.json" 2>/dev/null || true
-# A file built here replaces the release's own, which must be Voile's still; one kept keeps its entry.
-entry() {
-    local found
-    found="$(kept "$2")"
-    if [[ -n "$found" && "$(sha "$OUT/$2")" == "$(/usr/bin/python3 -c 'import json,sys; print(json.loads(sys.argv[1])["patched"])' "$found")" &&
-          ! " $BUILT " == *" $2 "* ]]; then
-        echo "    $found"
-        return
-    fi
+# Each file's entry: the release's own SHA-256 (the release given must be Voile's still), ours, and every SHA-256 an
+# earlier committed version of this manifest had at that path (its history in git, every cli-v* release included):
+# a player who has an earlier obelisk-cli's files gets this one's over them. A rule, checked here: a manifest that does
+# not list every predecessor is not written.
+for pair in "$WSD wsd" "$DRIVER wineobelisk.so" "$SERVER virgl_render_server" "$SERVER_X86 virgl_render_server-x86_64" "$FEXDARWIN fexdarwin-run"; do
+    set -- $pair
     [[ "$(sha "$LINUX/$1")" != "$(sha "$OUT/$2")" ]] || fail "$LINUX/$1 is ours already: give a copy of $RELEASE as Voile ships it."
-    echo "    { \"path\": \"$1\", \"source\": \"$2\", \"original\": \"$(sha "$LINUX/$1")\", \"patched\": \"$(sha "$OUT/$2")\" }"
-}
-cat > "$WORK/manifest.json" <<JSON
-{
-  "voile": "$RELEASE",
-  "sources": {
-    "voile-lkd": $SOURCE_LKD,
-    "voile-wine": $SOURCE_WINE,
-    "neptune": $SOURCE_NEPTUNE
-  },
-  "files": [
-$(entry "$WSD" wsd),
-$(entry "$DRIVER" wineobelisk.so),
-$(entry "$SERVER" virgl_render_server),
-$(entry "$SERVER_X86" virgl_render_server-x86_64)
-  ]
-}
-JSON
+done
+HISTORY="$WORK/history"
+mkdir -p "$HISTORY"
+for commit in $(git -C "$PROJECT_ROOT" log --format=%H -- crates/game-runtime/engine-patch/manifest.json) \
+              $(git -C "$PROJECT_ROOT" tag --list 'cli-v*'); do
+    git -C "$PROJECT_ROOT" show "$commit:crates/game-runtime/engine-patch/manifest.json" > "$HISTORY/$commit.json" 2>/dev/null ||
+        rm -f "$HISTORY/$commit.json"
+done
+/usr/bin/python3 -I - "$OUT" "$LINUX" "$RELEASE" "$HISTORY" "$SOURCE_LKD" "$SOURCE_WINE" "$SOURCE_NEPTUNE" > "$WORK/manifest.json" <<'PY' ||
+import hashlib, json, os, sys
+out, linux, release, history = sys.argv[1:5]
+sources = {"voile-lkd": json.loads(sys.argv[5]), "voile-wine": json.loads(sys.argv[6]), "neptune": json.loads(sys.argv[7])}
+sha = lambda p: hashlib.sha256(open(p, "rb").read()).hexdigest()
+files = [("engine/wsd", "wsd"), ("wine/lib/wine/x86_64-unix/wineobelisk.so", "wineobelisk.so"),
+         ("graphics/libexec/virgl_render_server", "virgl_render_server"),
+         ("graphics/x86_64/libexec/virgl_render_server", "virgl_render_server-x86_64"),
+         ("engine/fexdarwin-run", "fexdarwin-run")]
+earlier = {}
+for name in sorted(os.listdir(history)):
+    m = json.load(open(os.path.join(history, name)))
+    if m.get("voile") != release:
+        continue
+    for f in m["files"]:
+        earlier.setdefault(f["path"], set()).update([f["patched"], *f.get("previous", [])])
+entries = []
+for path, source in files:
+    original, patched = sha(os.path.join(linux, path)), sha(os.path.join(out, source))
+    previous = sorted(earlier.get(path, set()) - {patched, original})
+    entries.append({"path": path, "source": source, "original": original, "patched": patched, "previous": previous})
+# The rule: every SHA-256 an earlier manifest had at a path is this one's, its original or listed.
+for path, digests in earlier.items():
+    entry = next((e for e in entries if e["path"] == path), None)
+    if entry is None:
+        sys.exit(f"{path} was patched before and is not now: its earlier files would block every other")
+    missing = digests - {entry["patched"], entry["original"], *entry["previous"]}
+    if missing:
+        sys.exit(f"{path}: earlier SHA-256s not listed: {sorted(missing)}")
+lines = ['{', f'  "voile": "{release}",', '  "sources": {']
+lines.append(",\n".join(f'    "{k}": ' + json.dumps(v).replace("{", "{ ").replace("}", " }") for k, v in sources.items()))
+lines += ['  },', '  "files": [']
+lines.append(",\n".join("    " + json.dumps(e) for e in entries))
+lines += ['  ]', '}']
+print("\n".join(lines))
+PY
+    fail "The manifest would not list every earlier file of ours: no patch written."
 mv "$WORK/manifest.json" "$OUT/manifest.json"
 /usr/bin/python3 -m json.tool "$OUT/manifest.json" >/dev/null || fail "The manifest written is not JSON."
 cat "$OUT/manifest.json"

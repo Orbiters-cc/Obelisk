@@ -18,7 +18,10 @@ Commands:
   steam installed                     List the installed games
   steam install <app_id> [--language <locale>]
                                       Install or update the Windows build of a game
-  steam play <app_id> [-- <args>...]  Start an installed game and follow it until it ends
+  steam play <app_id> [--render-percent <1..100>] [-- <args>...]
+                                      Start an installed game and follow it until it ends;
+                                      --render-percent draws it at that share of the display's
+                                      pixels per side, for this launch only (Linux engine)
   steam running                       List the live Game sessions
   steam quit <app_id> [--session <id>] [--force] [--wait <seconds>]
                                       Ask a running game to end
@@ -58,6 +61,8 @@ pub enum Command {
         app_id: u32,
         /// What starts the game after its own arguments, as given.
         arguments: Vec<String>,
+        /// The render percent of this launch alone, over the installation's own choice.
+        render_percent: Option<u32>,
     },
     Running,
     Quit {
@@ -199,9 +204,10 @@ fn command(mut words: Words, game: Vec<String>) -> Result<Command, Failure> {
         Some(word) => return Err(usage(format!("{word} is not expected here: see --help."))),
     }
     Ok(match command {
-        Command::Play { app_id, .. } => Command::Play {
+        Command::Play { app_id, render_percent, .. } => Command::Play {
             app_id,
             arguments: game,
+            render_percent,
         },
         command => command,
     })
@@ -225,10 +231,19 @@ fn steam(words: &mut Words) -> Result<Command, Failure> {
             }
             Command::Install { app_id, language }
         }
-        "play" => Command::Play {
-            app_id: app_id(words.next(), "steam play")?,
-            arguments: Vec::new(),
-        },
+        "play" => {
+            let app_id = app_id(words.next(), "steam play")?;
+            let mut render_percent = None;
+            if words.words.as_slice().first().map(String::as_str) == Some("--render-percent") {
+                words.next();
+                let value = words.value("--render-percent")?;
+                render_percent = match value.parse::<u32>() {
+                    Ok(percent @ 1..=100) if value.bytes().all(|byte| byte.is_ascii_digit()) => Some(percent),
+                    _ => return Err(usage(format!("--render-percent takes 1 to 100, not {value}."))),
+                };
+            }
+            Command::Play { app_id, arguments: Vec::new(), render_percent }
+        }
         "quit" => {
             let app_id = app_id(words.next(), "steam quit")?;
             let (mut force, mut wait, mut session) = (false, None, None);
@@ -411,7 +426,8 @@ mod tests {
             command_of(&["steam", "play", "438100"]),
             Command::Play {
                 app_id: 438100,
-                arguments: Vec::new()
+                arguments: Vec::new(),
+                render_percent: None
             }
         );
         assert_eq!(
@@ -434,14 +450,37 @@ mod tests {
                     "two words".into(),
                     "--".into(),
                     "--help".into()
-                ]
+                ],
+                render_percent: None
             }
         );
         assert_eq!(
             command_of(&["steam", "play", "438100", "--"]),
             Command::Play {
                 app_id: 438100,
-                arguments: Vec::new()
+                arguments: Vec::new(),
+                render_percent: None
+            }
+        );
+    }
+
+    #[test]
+    fn a_render_percent_is_for_one_launch_and_comes_before_the_game_s_arguments() {
+        assert_eq!(
+            command_of(&["steam", "play", "438100", "--render-percent", "58", "--", "--no-vr"]),
+            Command::Play {
+                app_id: 438100,
+                arguments: vec!["--no-vr".into()],
+                render_percent: Some(58)
+            }
+        );
+        // After the two dashes it is the game's.
+        assert_eq!(
+            command_of(&["steam", "play", "438100", "--", "--render-percent", "58"]),
+            Command::Play {
+                app_id: 438100,
+                arguments: vec!["--render-percent".into(), "58".into()],
+                render_percent: None
             }
         );
     }
@@ -477,6 +516,11 @@ mod tests {
             &["steam", "play", "0"],
             &["steam", "play", "+438100"],
             &["steam", "play", "438100", "--no-vr"],
+            &["steam", "play", "438100", "--render-percent"],
+            &["steam", "play", "438100", "--render-percent", "0"],
+            &["steam", "play", "438100", "--render-percent", "101"],
+            &["steam", "play", "438100", "--render-percent", "+58"],
+            &["steam", "play", "438100", "--render-percent", "58.5"],
             &["steam", "install", "438100", "--language"],
             &["steam", "installed", "--", "--no-vr"],
             &["steam", "login"],

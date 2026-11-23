@@ -187,6 +187,17 @@ pub fn add_arguments(arguments: Vec<String>) -> bool {
 /// What `add_arguments` was given.
 static ADDED: OnceLock<Vec<String>> = OnceLock::new();
 
+/// The render percent of every game this process launches, over the
+/// installation's own choice and without keeping it (`obelisk-cli steam play
+/// --render-percent`): applied where the game's engine offers it, ignored
+/// where it does not. A later call changes nothing and returns false.
+pub fn override_render_percent(percent: u32) -> bool {
+    RENDER_PERCENT.set(percent).is_ok()
+}
+
+/// What `override_render_percent` was given.
+static RENDER_PERCENT: OnceLock<u32> = OnceLock::new();
+
 /// What starts `game` in the player's language, `locale` such as `it_IT`,
 /// when the game reads its language from its command line rather than from
 /// Windows, and the player put no language of their own in `chosen`, their
@@ -523,6 +534,9 @@ impl View {
         added: &[String],
     ) -> Self {
         let mut settings = choices.apply(profile);
+        if let Some(percent) = RENDER_PERCENT.get().copied().filter(|p| offer(settings.engine).offers_render_percent(*p)) {
+            settings.render_percent = percent;
+        }
         settings.arguments.extend(added.iter().cloned());
         settings.locale = locale.map(str::to_owned);
         let language =

@@ -165,8 +165,12 @@ impl Adapter for LinuxEngine {
         }
         // The keyboard layout selected on the Mac, where the runtime is the
         // release the Orbiters fork's engine files are for; any other runs
-        // as Voile shipped it.
-        crate::voile::engine_patch::apply(&config.runtime);
+        // as Voile shipped it. A switch that failed and could not be undone
+        // leaves files of two sets, on which no game starts.
+        if let Err(mixed) = crate::voile::engine_patch::apply(&config.runtime) {
+            eprintln!("engine patch: the runtime's engine files are of two sets, not started: {}", mixed.paths.join(", "));
+            return Err(Error::WineIncomplete);
+        }
         let direct3d = DIRECT3D.map(|library| config.runtime.join("windows").join(library));
         let neptune = config.runtime.join(WINE_DLLS).join(NEPTUNE);
         if !direct3d.iter().chain([&neptune]).all(|file| file.is_file()) {

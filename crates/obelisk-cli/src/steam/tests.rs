@@ -179,7 +179,7 @@ fn a_command_that_needs_an_account_fails_signed_out_before_it_makes_or_reaches_a
         out: &out,
     };
     assert_eq!(
-        run(steam.play(438100, vec!["--no-vr".into()]))
+        run(steam.play(438100, vec!["--no-vr".into()], None))
             .unwrap_err()
             .code,
         NOT_SIGNED_IN
@@ -203,7 +203,7 @@ fn a_launch_without_its_helpers_fails_before_it_reaches_steam() {
         out: &out,
     };
     assert_eq!(
-        run(steam.play(438100, Vec::new())).unwrap_err().code,
+        run(steam.play(438100, Vec::new(), Some(58))).unwrap_err().code,
         HELPERS_MISSING
     );
     assert_eq!(run(steam.running()).unwrap_err().code, HELPERS_MISSING);

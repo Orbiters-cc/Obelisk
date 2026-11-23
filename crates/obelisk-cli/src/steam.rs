@@ -452,7 +452,7 @@ impl Steam<'_> {
     /// does, with `arguments` after the game's own, and follows its Game
     /// session until it is finished. The supervisor owns the game: it runs on
     /// when this process ends.
-    pub async fn play(&self, app_id: u32, arguments: Vec<String>) -> Result<(), Failure> {
+    pub async fn play(&self, app_id: u32, arguments: Vec<String>, render_percent: Option<u32>) -> Result<(), Failure> {
         let saved = credentials::signed_in(self.store)?;
         self.places.require_helpers()?;
         self.places.open_library()?;
@@ -505,6 +505,9 @@ impl Steam<'_> {
         // Read as its launch settings are, by this launch alone.
         if !arguments.is_empty() {
             game_runtime::launch_settings::add_arguments(arguments);
+        }
+        if let Some(percent) = render_percent {
+            game_runtime::launch_settings::override_render_percent(percent);
         }
         installations.launch(installed.id.clone());
         let admitted = installations.state();

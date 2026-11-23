@@ -79,7 +79,7 @@ async fn dispatch(
         Command::Logout => steam.logout().await,
         Command::Installed => steam.installed(),
         Command::Install { app_id, language } => steam.install(app_id, language).await,
-        Command::Play { app_id, arguments } => steam.play(app_id, arguments).await,
+        Command::Play { app_id, arguments, render_percent } => steam.play(app_id, arguments, render_percent).await,
         Command::Running => steam.running().await,
         Command::Quit {
             app_id,
