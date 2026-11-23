@@ -569,6 +569,8 @@ It is one more complete set of engine files for the same Voile release: the rele
 | `OBELISK_TIMELINE` | With the timeline generation only: an existing folder outside everything the game sees. The window server and the render server record into a folder of the start in it; the launcher takes the three variables away before anything else starts, so neither the game nor the emulator that runs it ever has them. |
 | `OBELISK_TIMELINE_MB` | 1 to 8192 (1024): what one start's recorders may write in all. They stop for good there. |
 | `OBELISK_TIMELINE_PASSES` | 0 to 1000 (0): the encoders and their GPU times of every so many frames. |
+| `OBELISK_WSD_UPSCALE` | With the timeline generation only, recording or not: `metalfx`. How the window server scales a frame smaller than its window; unset, as ever. The launcher gives it to the window server alone (voile-lkd's `docs/wsd-switches.md`). |
+| `OBELISK_WSD_PRESENT` | The same: a list of `arrival`, `attime`, `nosync`, `two`, how the window server presents. |
 
 `engine generation` puts the generation this process was asked for in place, as a launch does and by the same code (one recorded transaction under the library's locks, refused while anything of the engine runs), proves it, and tells one `engine_generation` line: `generation`, `voile`, and `engine_files` (each `path` with its `sha256`). `engine rehearse <folder> <program> <1..100> <log> [-- <argument>...]` runs an owned Windows program of that folder as a game starts on the engine, without Steam, and tells `rehearsal_running` (`pid`) and `rehearsal_exited` (`exit_code`).
 
