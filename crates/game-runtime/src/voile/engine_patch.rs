@@ -1544,6 +1544,7 @@ mod tests {
         (root, linux)
     }
 
+    #[cfg(not(feature = "developer-timeline"))] // (two of its files come from a folder: developer.rs)
     #[test]
     fn the_files_built_in_are_the_ones_the_manifest_names() {
         let patch = built_in();
