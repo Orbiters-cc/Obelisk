@@ -56,6 +56,7 @@ impl Harness for SteamHarness {
                     prefix: None,
                 }),
                 status: obelisk_core::OnlineStatus::default(),
+                pin: None,
             },
         )
     }

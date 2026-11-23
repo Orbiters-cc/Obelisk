@@ -583,3 +583,110 @@ fn a_beta_the_feed_no_longer_lists_is_still_left_without_beta_releases() {
     );
     assert_eq!(runtime(root), Some(root.join("v1.0.0-3.beta1")));
 }
+
+/// Fifth verification, findings 2 and 5: a repair lays the release again over
+/// the one in place, whatever is missing or foreign in it, only once the new
+/// one is whole, under the runtime's own lock.
+#[tokio::test]
+async fn a_repair_lays_the_release_again_in_one_step_and_never_under_a_game() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("Voile");
+    let (archive, release) = release_archive(directory.path(), "v1.0.0-2", "v1.0.0-2");
+    let install = || async { Install::new().install(&root, &release, Some(&archive)).await };
+    let again = || async { Install::new().put(&root, &release, Some(&archive), true).await };
+    install().await.unwrap();
+    let linux = root.join("v1.0.0-2/linux");
+    let damage = || {
+        fs::write(linux.join("engine/fexdarwin-run"), "damaged").unwrap();
+        fs::write(linux.join(".obelisk-engine-patch.txn.json"), "{ half").unwrap();
+    };
+    damage();
+    // An install finds the release in place; a repair lays it again.
+    install().await.unwrap();
+    assert_eq!(fs::read(linux.join("engine/fexdarwin-run")).unwrap(), b"damaged");
+    assert_eq!(again().await, Ok(root.join("v1.0.0-2")));
+    assert_eq!(fs::read(linux.join("engine/fexdarwin-run")).unwrap(), b"engine");
+    assert!(!linux.join(".obelisk-engine-patch.txn.json").exists());
+    assert_eq!(names(&root), ["v1.0.0-2"], "nothing is left beside it");
+
+    // Never under a game, and nothing changes.
+    damage();
+    let pin = engine_patch::Pin::hold(&linux).unwrap();
+    assert_eq!(again().await, Err(Failure::InUse));
+    assert_eq!(fs::read(linux.join("engine/fexdarwin-run")).unwrap(), b"damaged");
+    drop(pin);
+
+    // A damaged download replaces nothing: what is in place, and what an
+    // update left there, stay.
+    let mut damaged = release.clone();
+    damaged.sha256 = "0".repeat(64);
+    let failed = Install::new().put(&root, &damaged, Some(&archive), true).await;
+    assert_eq!(failed, Err(Failure::Damaged));
+    assert!(linux.join(".obelisk-engine-patch.txn.json").exists());
+
+    // Another process that installs is waited for.
+    let held = engine_patch::installing(&root).unwrap().unwrap();
+    let (install, waiting) = (Install::new(), again());
+    tokio::select! {
+        done = waiting => panic!("it did not wait: {done:?}"),
+        () = tokio::time::sleep(Duration::from_millis(400)) => {}
+    }
+    drop(install);
+    drop(held);
+    assert_eq!(again().await, Ok(root.join("v1.0.0-2")));
+}
+
+/// Finding 2: an install lays a runtime's folder while no launch prepares in
+/// it, and a release a game of any process holds is never removed.
+#[tokio::test]
+async fn a_replaced_release_a_game_holds_stays_until_it_is_let_go() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("Voile");
+    lay(&root, "v1.0.0-1", r#"{"version": "v1.0.0-1"}"#);
+    lay(&root, "v1.0.0-2", r#"{"version": "v1.0.0-2"}"#);
+    let pin = engine_patch::Pin::hold(&root.join("v1.0.0-1/linux")).unwrap();
+    remove_replaced(&root);
+    assert_eq!(names(&root), ["v1.0.0-1", "v1.0.0-2"]);
+    drop(pin);
+    for _ in 0..200 {
+        remove_replaced(&root);
+        if names(&root) == ["v1.0.0-2"] {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("{:?}", names(&root));
+}
+
+/// The release a repair lays again: the one games run in, else the newest
+/// there is the folder of, whatever it lost.
+#[test]
+fn a_repair_names_the_release_in_place_whatever_it_lost() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("Voile");
+    fs::create_dir_all(&root).unwrap();
+    let named = || to_repair(&root, &Offer::read(&root));
+    assert_eq!(named(), None);
+    fs::create_dir_all(root.join("v1.0.0-1/linux")).unwrap();
+    fs::create_dir_all(root.join("v1.0.0-3/linux")).unwrap();
+    assert_eq!(named().as_deref(), Some("v1.0.0-3"));
+    lay(&root, "v1.0.0-2", r#"{"version": "v1.0.0-2"}"#);
+    assert_eq!(named().as_deref(), Some("v1.0.0-2"), "the one games run in");
+}
+
+#[test]
+fn what_replaces_a_runtime_takes_its_place_in_one_step() {
+    let directory = tempfile::tempdir().unwrap();
+    let (new, place) = (directory.path().join("new"), directory.path().join("place"));
+    for (folder, text) in [(&new, "new"), (&place, "old")] {
+        fs::create_dir(folder).unwrap();
+        fs::write(folder.join("file"), text).unwrap();
+    }
+    put_in_place(&new, &place).unwrap();
+    assert_eq!(fs::read(place.join("file")).unwrap(), b"new");
+    // The one it replaced is where the new one was, to go with its folder.
+    assert_eq!(fs::read(new.join("file")).unwrap(), b"old");
+    // A failure leaves the one in place.
+    assert!(put_in_place(&directory.path().join("gone"), &place).is_err());
+    assert_eq!(fs::read(place.join("file")).unwrap(), b"new");
+}

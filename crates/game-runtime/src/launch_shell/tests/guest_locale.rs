@@ -220,7 +220,8 @@ fn hand_over<L: Library>(library: &L, receipt: &Receipt<L::G>, launched: &Launch
         .unwrap()
         .unwrap()
         .ready(locations, &target, &Prerequisites(Vec::new()))
-        .unwrap();
+        .unwrap()
+        .config;
     let request = Request::<L::G>::new(
         library.configuration(receipt, Some(wine.prefix.clone())),
         L::account(),
@@ -656,4 +657,130 @@ fn an_epic_game_that_reads_its_language_from_its_command_line_gets_it_from_its_l
             "-language=ITA"
         ]
     );
+}
+
+/// A launch on the Linux engine holds its runtime until whatever ends it
+/// (fifth verification, finding 4: until 0.1.8 a launch that failed or was
+/// cancelled once prepared, or any one of Epic or GOG, held it for the life of
+/// the host process, and no update could be made).
+fn released(locations: &Locations) {
+    let runtime = locations.voile.join("current");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while crate::voile::engine_patch::Replacing::hold(&runtime)
+        .unwrap()
+        .is_none()
+    {
+        assert!(std::time::Instant::now() < deadline, "the runtime is still held");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+async fn a_launch_holds_its_runtime_until_whatever_ends_it<L: Library>() {
+    use crate::sessions::{Failure, Handover as _};
+    let library = L::bundled();
+    let locations = library.locations();
+    let receipt = library.receipt(Platform::Windows);
+    library.complete_windows_build(&pe());
+    installed(locations, &receipt, Engine::Linux);
+
+    // Handed to a supervisor (which here never acknowledges).
+    let sessions = super::ready_sessions::<L>().await;
+    let admission = sessions.admit(L::game(), L::account()).unwrap();
+    let launched = library.launch(&receipt, admission).await;
+    assert_eq!(launched, Err(Failure::Failed(L::SESSION.into())));
+    assert!(library.handed_over().is_some(), "it was handed over");
+    released(locations);
+
+    // Prepared, then cancelled before its start: whatever holds what was
+    // prepared drops it.
+    let windows = receipt.windows(locations).unwrap().unwrap();
+    let handover = super::Handover {
+        sign_in: library.signing(),
+        configuration: library.configuration(&receipt, Some(windows.prefix().to_owned())),
+        windows: Some(windows),
+        locations: locations.clone(),
+    };
+    let prepared = handover.prepare().await.unwrap_or_else(|_| panic!("it is prepared"));
+    let runtime = locations.voile.join("current");
+    let hold = || crate::voile::engine_patch::Replacing::hold(&runtime).unwrap();
+    assert!(hold().is_none(), "held while it is prepared");
+    drop(prepared);
+    released(locations);
+
+    // Prepared, then refused its credential.
+    let shown = library.refuse_credential();
+    let sessions = super::ready_sessions::<L>().await;
+    let admission = sessions.admit(L::game(), L::account()).unwrap();
+    let launched = library.launch(&receipt, admission).await;
+    assert_eq!(launched, Err(Failure::Failed(shown.into())));
+    released(locations);
+}
+
+#[tokio::test]
+async fn an_epic_launch_holds_its_runtime_until_whatever_ends_it() {
+    a_launch_holds_its_runtime_until_whatever_ends_it::<EpicLibrary>().await;
+}
+
+#[tokio::test]
+async fn a_gog_launch_holds_its_runtime_until_whatever_ends_it() {
+    a_launch_holds_its_runtime_until_whatever_ends_it::<GogLibrary>().await;
+}
+
+#[test]
+fn a_steam_launch_holds_its_runtime_until_whatever_ends_it() {
+    let (_directory, root) = installation();
+    let locations = locations(&root);
+    let install = locations.library.join("Games/steam-42-windows");
+    let receipt = Receipt::<Steam> {
+        product: steam::Product {
+            app_id: 42,
+            language: "english".into(),
+        },
+        name: "Fixture".into(),
+        directory: install.to_string_lossy().into_owned(),
+        platform: Platform::Windows,
+        total_bytes: 7,
+        needs_verification: false,
+    };
+    let runtime = installed(&locations, &receipt, Engine::Linux);
+    fs::create_dir_all(runtime.join("steam")).unwrap();
+    for client in ["steamclient.dll", "steamclient64.dll"] {
+        fs::write(runtime.join("steam").join(client), client).unwrap();
+    }
+    let windows = receipt.windows(&locations).unwrap();
+    let prepare = || {
+        steam::prepare(
+            &locations,
+            &receipt,
+            windows.as_ref(),
+            &plan(&install.join("Game.exe"), &[]),
+        )
+    };
+    let held = || {
+        crate::voile::engine_patch::Replacing::hold(&locations.voile.join("current"))
+            .unwrap()
+            .is_none()
+    };
+    let request = prepare().unwrap_or_else(|_| panic!("it is prepared"));
+    assert!(held(), "held while it is prepared");
+    // What crosses the pipe carries no pin: the supervisor inherits it.
+    assert!(!serde_json::to_string(&request).unwrap().contains("\"pin\":"));
+    drop(request);
+    released(&locations);
+    // A start that fails drops it too: no helper there to become a supervisor.
+    let request = prepare().unwrap_or_else(|_| panic!("it is prepared"));
+    let credentials = crate::protocol::Credentials {
+        steam_id: 76_561_197_960_265_729,
+        account_name: "gordon".into(),
+        refresh_token: "token".into(),
+    };
+    let cancel = obelisk_core::transfer::CancelToken::new();
+    let started = steam::start(&root.join("no-helper"), &credentials, request, &cancel);
+    assert!(started.is_err());
+    released(&locations);
+    // A preparation that fails part way holds nothing.
+    fs::remove_dir_all(runtime.join("steam")).unwrap();
+    assert!(prepare().is_err());
+    released(&locations);
+    fs::create_dir_all(locations.voile.join("current")).unwrap();
 }

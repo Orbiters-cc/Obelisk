@@ -108,7 +108,8 @@ impl From<crate::launch::Error> for Error {
             | E::InvalidApplication
             | E::NotExecutable
             | E::WineUnavailable
-            | E::WineIncomplete => Self::Launch(error),
+            | E::WineIncomplete
+            | E::EngineFiles(_) => Self::Launch(error),
         }
     }
 }
@@ -161,6 +162,10 @@ pub struct Request {
     /// How the game shows the account to its friends.
     #[serde(default)]
     pub status: obelisk_core::OnlineStatus,
+    /// What holds the engine files this launch was prepared on, until its
+    /// supervisor does. It never crosses the pipe: the supervisor inherits it.
+    #[serde(skip)]
+    pub pin: Option<crate::voile::engine_patch::Pin>,
 }
 
 impl supervisor::Provider for Steam {
@@ -206,15 +211,16 @@ pub fn prepare(
     let home = &locations.home;
     let install = Path::new(&receipt.directory);
     let app_id = receipt.product.app_id;
-    let (wine, target, steam_api) = match windows {
+    let (wine, pin, target, steam_api) = match windows {
         Some(windows) => {
-            let wine = windows.ready(locations, target, &windows::Prefix { install })?;
+            let crate::wine::Ready { config: wine, pin } =
+                windows.ready(locations, target, &windows::Prefix { install })?;
             let launched = windows::target(&wine, &receipt.wine_game(), target, home)?;
-            (Some(wine), launched, None)
+            (Some(wine), pin, launched, None)
         }
         None => {
             let (launched, steam_api) = native_target(install, target, home, app_id)?;
-            (None, launched, Some(steam_api))
+            (None, None, launched, Some(steam_api))
         }
     };
     let cloud = cloud::Config {
@@ -244,6 +250,7 @@ pub fn prepare(
         cloud: Some(cloud),
         target,
         status: obelisk_core::OnlineStatus::default(),
+        pin,
     })
 }
 
@@ -301,6 +308,7 @@ pub(crate) fn start_command(
         helper,
         id,
         command,
+        request.pin.as_ref(),
         probe,
         |pipe| {
             credentials
@@ -476,7 +484,7 @@ mod error_tests {
             (Launch::StartFailed, "backend.steam.runtime.startFailed"),
             (Launch::Unavailable, "backend.steam.runtime.unavailable"),
         ] {
-            assert_eq!(Error::from(failure).to_string(), key, "{failure:?}");
+            assert_eq!(Error::from(failure.clone()).to_string(), key, "{failure:?}");
         }
         for (failure, key) in [
             (

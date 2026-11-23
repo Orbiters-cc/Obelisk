@@ -33842,6 +33842,59 @@
         }
       }
     },
+    "backend.runtime.engineFiles": {
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Engine-Dateien von Wine, das Windows-Spiele ausführt, stammen nicht alle aus derselben Version oder können nicht unverändert gehalten werden: %@"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wine’s engine files, which run Windows games, are not all of one release, or cannot be held as they are: %@"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Los archivos del motor de Wine, que ejecuta los juegos de Windows, no son todos de la misma versión o no pueden mantenerse como están: %@"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Les fichiers du moteur de Wine, qui fait tourner les jeux Windows, ne viennent pas tous de la même version, ou ne peuvent pas être gardés tels quels : %@"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "I file del motore di Wine, che esegue i giochi Windows, non sono tutti della stessa versione o non possono essere mantenuti così come sono: %@"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Windowsゲームを動かすWineのエンジンファイルがすべて同じリリースのものではないか、そのまま保持できません：%@"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Os arquivos do mecanismo do Wine, que executa os jogos do Windows, não são todos da mesma versão ou não podem ser mantidos como estão: %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "运行 Windows 游戏的 Wine 引擎文件并非全部来自同一版本，或无法保持原样：%@"
+          }
+        }
+      }
+    },
     "backend.runtime.wineUnavailable": {
       "extractionState": "manual",
       "localizations": {
@@ -34050,6 +34103,59 @@
           "stringUnit": {
             "state": "translated",
             "value": "Obelisk 无法将 Wine 安装到其库中。请检查可用磁盘空间后重试。"
+          }
+        }
+      }
+    },
+    "backend.voile.inUse": {
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ein Spiel verwendet die Dateien von Wine: Beenden Sie es und versuchen Sie es erneut."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A game runs on Wine’s files: quit it, then try again."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Un juego usa los archivos de Wine: ciérralo e inténtalo de nuevo."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Un jeu utilise les fichiers de Wine : quittez-le, puis réessayez."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Un gioco sta usando i file di Wine: chiudilo e riprova."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ゲームがWineのファイルを使用しています。ゲームを終了してから、もう一度お試しください。"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Um jogo está usando os arquivos do Wine: feche-o e tente novamente."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有游戏正在使用 Wine 的文件：请退出游戏后重试。"
           }
         }
       }

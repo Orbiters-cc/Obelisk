@@ -20,6 +20,19 @@
 #   --pass NAME               this script's variable NAME, when set, as a variable of the guest
 # OBELISK_APP_NAME names the game in the menu bar, the Dock and Cmd-Tab.
 set -u
+# The guest's standard error goes to the supervisor, which filters and bounds it into the game's log, through a pipe
+# whose writing end never blocks (game_log.rs; OBELISK_LOG_PIPE names its reading and writing ends): a line that finds
+# it full is lost, and the game goes on. This script keeps the reading end, unread, until the game is gone, so that a
+# supervisor that is gone first is a full pipe, never a broken one, which would end the game. Without one, the guest
+# writes where this script does. The programs started here write to the log itself, and get none of these.
+log_ends=${OBELISK_LOG_PIPE-}
+unset OBELISK_LOG_PIPE
+exec 9>&2
+if [[ $log_ends =~ ^([0-9]{2,3})\ ([0-9]{2,3})$ ]] && { : <&"${BASH_REMATCH[1]}"; } 2>/dev/null &&
+    { : >&"${BASH_REMATCH[2]}"; } 2>/dev/null; then
+    exec 7<&"${BASH_REMATCH[1]}" 9>&"${BASH_REMATCH[2]}"
+    eval "exec ${BASH_REMATCH[1]}<&- ${BASH_REMATCH[2]}>&-"
+fi
 # The Steam host's discovery adapter is for macOS games; no process here needs it. On a Mac with SIP off, dyld also
 # inserts it into the system tools this script runs (mkdir, tr, tail), which are arm64e and abort without that slice.
 unset DYLD_INSERT_LIBRARIES
@@ -164,7 +177,7 @@ else
     render=$(render_server "$runtime/graphics/libexec/virgl_render_server" dxmt) || exit 1
 fi
 
-"$app/Contents/MacOS/wsd" --dir "$sockets" ${render_percent:+--render-percent "$render_percent"} &
+"$app/Contents/MacOS/wsd" --dir "$sockets" ${render_percent:+--render-percent "$render_percent"} 7<&- 9>&- &
 helpers+=($!)
 if [ "$graphics" = d3dmetal ]; then
     # D3DMetal is an Intel library: the Intel render server runs it under Rosetta. d3dmetal-native loads the
@@ -177,19 +190,19 @@ if [ "$graphics" = d3dmetal ]; then
     RENDER_SERVER_EXEC_PATH="$render" NPT_BACKEND=d3dmetal DMN_RESIDENCY_SET=0 \
         NPT_D3D11_LIBRARY_PATH="$d3dmetal" NPT_DXGI_LIBRARY_PATH="$d3dmetal" NPT_D3D12_LIBRARY_PATH="$d3dmetal" \
         D3DMETAL_FRAMEWORK_PATH="$runtime/../lib/external/D3DMetal.framework" \
-        "$server/bin/virgl_test_server" --no-virgl --no-fork --socket-path "$sockets/vtest.sock" &
+        "$server/bin/virgl_test_server" --no-virgl --no-fork --socket-path "$sockets/vtest.sock" 7<&- 9>&- &
 else
     dxmt="$runtime/graphics/dxmt-native.framework/Versions/A/dxmt-native"
     RENDER_SERVER_EXEC_PATH="$render" NPT_BACKEND=dxmt \
         NPT_D3D11_LIBRARY_PATH="$dxmt" NPT_DXGI_LIBRARY_PATH="$dxmt" NPT_D3D12_LIBRARY_PATH="$dxmt" \
-        "$runtime/graphics/bin/virgl_test_server" --no-virgl --no-fork --socket-path "$sockets/vtest.sock" &
+        "$runtime/graphics/bin/virgl_test_server" --no-virgl --no-fork --socket-path "$sockets/vtest.sock" 7<&- 9>&- &
 fi
 helpers+=($!)
 # The input service gives the Mac's gamepads to Wine's Obelisk bus. A runtime without it starts the game without
 # gamepads.
 input=
 if [ -x "$runtime/engine/obelisk-input" ]; then
-    "$runtime/engine/obelisk-input" --dir "$sockets" &
+    "$runtime/engine/obelisk-input" --dir "$sockets" 7<&- 9>&- &
     helpers+=($!)
     input=1
 fi
@@ -199,23 +212,6 @@ for _ in $(seq 1 100); do
     sleep 0.05
 done
 
-# The guest's standard error (the log: the supervisor gives the launcher the log as its standard error, its standard
-# output goes nowhere, as before) goes to the log through a bounded writer: a line repeated without end (a renderer that retries
-# after its graphics went for good wrote 420 MB in five minutes, 2.6 million times each of three lines) is kept 200
-# times as it is, then counted: a line saying how many came so far at 1000, 10000, 100000 and every million, and the
-# totals at the end. The lines the frame counters and the incident capture read (Neptune's presents, the window
-# server's, the engine's own, the launch script's waits, a lost renderer's) always pass as they are, and nothing is
-# ever cut or rewritten: the log only grows. Lines differing in their numbers only count as one.
-log_filter='
-function key(s) { gsub(/0x[0-9a-fA-F]+/, "0x#", s); gsub(/[0-9]+/, "#", s); return s }
-/neptune unixlib wsi|guest swapchain|metal-HUD|wsd:|^lkd:|obelisk-wait:|destroying Neptune context|CONTEXT_LOST/ { print; fflush(); next }
-{
-    k = key($0); n = ++seen[k]
-    if (n == 1 && ++kinds > 50000) { for (x in seen) if (seen[x] > 200) printf "[obelisk-log: %d lines like this until here: %s]\n", seen[x], x; split("", seen); kinds = 1; seen[k] = 1; n = 1 }
-    if (n <= 200) { print; fflush() }
-    else if (n == 1000 || n == 10000 || n == 100000 || n % 1000000 == 0) { printf "[obelisk-log: %d lines like this so far, the ones after the first 200 left out: %s]\n", n, $0; fflush() }
-}
-END { for (x in seen) if (seen[x] > 200) printf "[obelisk-log: %d lines like this in all: %s]\n", seen[x], x }'
 # voile-lkd's recent-event ring for this session, new each start (the incident capture copies it while it runs).
 [ -n "${LKD_EVENT_RING-}" ] && rm -f "$LKD_EVENT_RING"
 export FEXDARWIN_LKD=1 FEXDARWIN_ROOT="$runtime/root" FEXDARWIN_ROOT_RO=1 FEXDARWIN_SUPERVISOR_PID=$$
@@ -225,7 +221,7 @@ export FEXDARWIN_BIND="/opt/wine=$runtime/wine:ro;/home/user=$home;/opt/game=$in
 # Each of the two waits says when it returned (`obelisk-wait:` lines in the game's log), so that a quit that does not
 # finish shows which one it is stuck in.
 "$runtime/engine/fexdarwin-run" --cwd "$cwd" ${guest_env[@]+"${guest_env[@]}"} \
-    /bin/sh -c '/opt/wine/bin/wineserver -p0; /opt/wine/bin/wine "$@"; status=$?; echo "obelisk-wait: wine returned $status at $(date +%H:%M:%S.%N 2>/dev/null)" >&2; /opt/wine/bin/wineserver -w; echo "obelisk-wait: wineserver -w returned at $(date +%H:%M:%S.%N 2>/dev/null)" >&2; exit $status' sh "$@" 2> >(LC_ALL=C /usr/bin/awk "$log_filter" >&2) &
+    /bin/sh -c '/opt/wine/bin/wineserver -p0; /opt/wine/bin/wine "$@"; status=$?; echo "obelisk-wait: wine returned $status at $(date +%H:%M:%S.%N 2>/dev/null)" >&2; /opt/wine/bin/wineserver -w; echo "obelisk-wait: wineserver -w returned at $(date +%H:%M:%S.%N 2>/dev/null)" >&2; exit $status' sh "$@" 2>&9 7<&- 9>&- &
 game=$!
 wait "$game"
 status=$?

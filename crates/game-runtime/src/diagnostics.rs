@@ -90,12 +90,15 @@ pub(crate) fn cloud_note(home: &Path, game: Game<'_>) -> PathBuf {
 pub(crate) fn open_log(log: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     let _ = fs::rename(log, previous_log(log));
-    fs::OpenOptions::new()
-        .write(true)
+    // Appended to: the game's own processes and the writer of its guest's
+    // output (`game_log`) write into it, each what comes next.
+    let file = fs::OpenOptions::new()
+        .append(true)
         .create(true)
-        .truncate(true)
         .mode(0o600)
-        .open(log)
+        .open(log)?;
+    file.set_len(0)?;
+    Ok(file)
 }
 
 fn previous_log(log: &Path) -> PathBuf {

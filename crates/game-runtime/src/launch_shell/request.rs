@@ -42,12 +42,14 @@ pub(crate) struct Request<G: Launchable> {
 /// spawns the supervisor with an empty environment, hands it one request and
 /// returns once it acknowledged that launch (the acknowledgement names this
 /// account and this `G::store`). `wine` is how a Windows build runs, from
-/// `ready`, and must be absent for a Mac build.
+/// `ready`, and must be absent for a Mac build; `pin` what holds its engine's
+/// files.
 pub(crate) fn start<G: Launchable>(
     configuration: G::Configuration,
     account_id: String,
     credential: G::Credential,
     wine: Option<wine::Config>,
+    pin: Option<&crate::voile::engine_patch::Pin>,
     status: OnlineStatus,
     cancel: CancelToken,
 ) -> Result<supervisor::Client<G>, G::Error> {
@@ -64,6 +66,7 @@ pub(crate) fn start<G: Launchable>(
         build.helper,
         request.id.clone(),
         supervisor::Client::<G>::supervisor_command(build.helper),
+        pin,
         supervisor::client::inspect,
         |pipe| storage::send(pipe, &request),
         |ack| ack.account_id == request.account_id && ack.store == store,

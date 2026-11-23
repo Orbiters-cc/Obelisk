@@ -4,7 +4,7 @@
 //! anti-cheat then loads its Linux module. Only the games whose Launch settings
 //! name the engine run there, by their profile's choice or their player's;
 //! every other Windows game keeps Rosetta's Wine.
-use super::{Adapter, Additions, Config, Facts, Furnisher, Game, Graphics, Programs};
+use super::{Adapter, Additions, Config, Facts, Furnisher, Game, Graphics, Pin, Programs};
 use crate::{
     launch::Error,
     supervisor::{Target, architecture::Architecture},
@@ -161,7 +161,7 @@ impl Adapter for LinuxEngine {
         config: &Config,
         locations: &crate::Locations,
         storefront: &dyn Furnisher,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<Pin>, Error> {
         if !installed(config) {
             return Err(Error::WineUnavailable);
         }
@@ -169,12 +169,16 @@ impl Adapter for LinuxEngine {
         // release the Orbiters fork's engine files are for; any other runs
         // as Voile shipped it. The files change only as one transaction and
         // only while no game runs on the runtime; this launch pins them as
-        // they now are (its supervisor then holds its own pin to the game's
-        // exit). Files that are not one complete set start no game: the
-        // message names them and what to do.
-        if let Err(refused) = crate::voile::engine_patch::apply(&config.runtime, &config.prefix) {
+        // they now are (its supervisor then inherits that pin, to the game's
+        // exit). Files that are not one complete set, or that cannot be
+        // pinned, start no game: the failure names them and what to do.
+        let (_, pin) = crate::voile::engine_patch::apply(&config.runtime).map_err(|refused| {
             eprintln!("engine patch: not started: {refused}");
-            return Err(Error::WineIncomplete);
+            Error::EngineFiles(refused.into())
+        })?;
+        // Held: an install or a removal may have passed before the lock.
+        if !installed(config) {
+            return Err(Error::WineUnavailable);
         }
         let direct3d = DIRECT3D.map(|library| config.runtime.join("windows").join(library));
         let neptune = config.runtime.join(WINE_DLLS).join(NEPTUNE);
@@ -202,7 +206,7 @@ impl Adapter for LinuxEngine {
             None => return Err(Error::Storage),
         }
         translate_d3dmetal(config, &locations.helpers);
-        Ok(())
+        Ok(Some(pin))
     }
 
     /// The game starts through the engine's launcher, in a guest the

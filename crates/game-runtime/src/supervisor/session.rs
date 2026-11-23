@@ -149,6 +149,11 @@ pub(crate) trait Launch: Sized + 'static {
     const BEGIN: bool = false;
 
     fn open(input: &mut dyn Read) -> Result<(Opening<Self::P>, Self), Failure<Self>>;
+    /// What holds the Linux engine `runtime` for this session: the lock its
+    /// preparation took, which this process was started with.
+    fn pin(runtime: &std::path::Path) -> std::io::Result<crate::voile::engine_patch::Pin> {
+        crate::voile::engine_patch::Pin::inherited(runtime)
+    }
     /// Stops the storefront's own preparation outside Cloud, such as Steam's
     /// native host, when the launch is cancelled or revoked before spawn.
     fn interrupt(&self) -> Box<dyn Fn() + Send + Sync> {
@@ -546,6 +551,16 @@ pub(crate) fn serve<L: Launch>(
     // The executor exists before any durable write.
     let executor = crate::executor().map_err(Error::from)?;
     let (opening, mut launch) = L::open(&mut input)?;
+    // The Linux engine's files this launch was prepared on stay as they are until this supervisor ends, after
+    // the game: no update, repair or removal can change the window server, the render servers or the engine a
+    // running game started from. It holds the lock its preparation took, inherited with this process; a launch
+    // without it is not accepted.
+    let _engine_pin = launch
+        .wine()
+        .filter(|wine| wine.settings.engine == crate::wine::Engine::Linux)
+        .map(|wine| L::pin(&wine.runtime))
+        .transpose()
+        .map_err(|_| Error::StartFailed)?;
     let owner = OwnerLock::<L::P>::take(&opening.root)?;
     // No other supervisor of this storefront lives, but its game may.
     if let Some(previous) = journal::current::<Record<L::P>>(&opening.root)?
@@ -625,13 +640,6 @@ pub(crate) fn serve<L: Launch>(
         forced: Mutex::new(None),
     });
     let _ = session.interrupt.set(launch.interrupt());
-    // The Linux engine's files this launch was prepared on stay as they are until this supervisor ends,
-    // after the game: no update can change the window server, the render servers or the engine a running
-    // game started from (the preparation's own pin is let go once this one is held: before the first record).
-    let _engine_pin = launch.wine().filter(|wine| wine.settings.engine == crate::wine::Engine::Linux).map(|wine| {
-        crate::voile::engine_patch::Pin::hold(&wine.runtime)
-            .inspect_err(|error| eprintln!("engine patch: the runtime cannot be pinned for this session: {error}"))
-    });
     let _ = session.wine.set(launch.wine());
     let finished = Arc::new(AtomicBool::new(false));
     let listening = {
@@ -753,6 +761,12 @@ async fn run<L: Launch>(
         .prepare_host(session, &target, cloud.as_ref())
         .await?;
     let wine = launch.wine();
+    // What a guest on the Linux engine writes goes to its log through a pipe
+    // that never holds it up. Without one, it writes to the log itself.
+    let pipe = wine
+        .as_ref()
+        .filter(|wine| wine.settings.engine == crate::wine::Engine::Linux && target.log.is_some())
+        .and_then(|_| crate::game_log::Pipe::new().ok());
     // A game in Wine for macOS reads the Mac's gamepads through the input
     // service while it runs.
     let input = wine
@@ -787,8 +801,9 @@ async fn run<L: Launch>(
         &prepared.helper,
         &prepared.environment,
         exec::Admission::of(&target, log_header),
-    )?;
-    let (mut game, admitted) = {
+    )?
+    .logged(pipe);
+    let (mut game, mut guest_output, admitted) = {
         // Cancellation and spawn have one linearization point. Cancellation
         // after it never ends a game, including sign-out and UI loss.
         let _admission = session.admission.lock().unwrap();
@@ -796,7 +811,7 @@ async fn run<L: Launch>(
         if let Some(cloud) = cloud.as_mut() {
             cloud.started()?;
         }
-        let mut game = helper.spawn()?;
+        let (mut game, guest_output) = helper.spawn()?;
         {
             let mut state = session.state.lock().unwrap();
             state.spawned = true;
@@ -805,7 +820,7 @@ async fn run<L: Launch>(
         let admitted = game.admit(inspect, |starting| {
             session.update(|r| r.starting = Some(starting))
         });
-        (game, admitted)
+        (game, guest_output, admitted)
     };
     // A helper that never became the game keeps its ownership until it is
     // reaped, outside the admission lock.
@@ -850,6 +865,13 @@ async fn run<L: Launch>(
         .then(|| target.log.clone())
         .flatten()
         .and_then(|log| follow_shown(session.clone(), log, shown_stop.clone()));
+    if started
+        && let Some(writer) = &mut guest_output
+        && let Some(log) = &target.log
+        && let Ok(log) = std::fs::OpenOptions::new().append(true).open(log)
+    {
+        writer.write_to(log);
+    }
     let began = Instant::now();
     let status = game.exit().await;
     let ended = crate::boot_clock::now();
@@ -858,6 +880,10 @@ async fn run<L: Launch>(
     let seconds = began.elapsed().as_secs();
     let exit = status.code().unwrap_or(-1);
     drop(input);
+    // What the guest wrote last is in the log before its frames are read.
+    if let Some(writer) = guest_output {
+        let _ = tokio::task::spawn_blocking(move || writer.finish()).await;
+    }
     session.control.lock().unwrap().take();
     session.state.lock().unwrap().game = None;
     session.presence.stop();

@@ -224,6 +224,7 @@ impl<F: Setup> Handoff<F> {
             F::account(),
             F::credential(),
             wine,
+            None,
             obelisk_core::OnlineStatus::Online,
             CancelToken::new(),
         ))
@@ -324,6 +325,7 @@ pub(crate) fn a_start_that_cannot_run_the_build_spawns_no_supervisor<F: Setup>()
             account,
             F::credential(),
             wine,
+            None,
             obelisk_core::OnlineStatus::Online,
             CancelToken::new(),
         ));
@@ -337,6 +339,7 @@ pub(crate) fn a_start_that_cannot_run_the_build_spawns_no_supervisor<F: Setup>()
             config,
             account,
             F::credential(),
+            None,
             None,
             obelisk_core::OnlineStatus::Online,
             CancelToken::new(),
@@ -352,6 +355,7 @@ pub(crate) fn a_start_that_cannot_run_the_build_spawns_no_supervisor<F: Setup>()
         mac.config.clone(),
         F::account(),
         F::credential(),
+        None,
         None,
         obelisk_core::OnlineStatus::Online,
         cancelled,
@@ -748,7 +752,7 @@ pub(crate) fn a_private_file_lives_as_long_as_its_game_and_is_placed_where_the_e
 
 pub(crate) fn every_launch_failure_is_shown_with_the_storefronts_key<F: Setup>() {
     for (failure, key) in F::LAUNCH_KEYS {
-        assert_eq!(Error::<F::G>::from(failure).to_string(), key, "{failure:?}");
+        assert_eq!(Error::<F::G>::from(failure.clone()).to_string(), key, "{failure:?}");
     }
 }
 

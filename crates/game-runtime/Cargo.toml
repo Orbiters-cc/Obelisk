@@ -28,7 +28,8 @@ epic-kit.workspace = true
 gog-kit.workspace = true
 obelisk-core.workspace = true
 # The clock since the Mac booted, sleep counted (`boot_clock`).
-rustix = { version = "1", features = ["time"] }
+# The engine files' locks and exchange, the game log's pipe.
+rustix = { version = "1", features = ["time", "fs", "stdio", "event", "pipe"] }
 
 [dev-dependencies]
 sha1.workspace = true

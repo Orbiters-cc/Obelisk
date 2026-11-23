@@ -25,6 +25,9 @@ pub(crate) struct Script {
     pub helper: Helper,
     /// The admission names an executable that does not exist.
     pub missing: bool,
+    /// How the game runs in Wine, when it does.
+    #[serde(default)]
+    pub wine: Option<crate::wine::Config>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -303,7 +306,7 @@ pub(crate) fn target(directory: &Path, script: &Script) -> Target {
         arguments: vec![directory.join("game.sh").to_string_lossy().into()],
         working_directory: directory.into(),
         environment: [("PATH".to_string(), "/usr/bin:/bin".to_string())].into(),
-        log: None,
+        log: script.wine.is_some().then(|| directory.join("game.log")),
         installation: Some(directory.into()),
         program: None,
     }
@@ -339,6 +342,16 @@ fn fixture_command<H: Harness>(directory: &Path) -> Process {
 }
 
 fn start<H: Harness>(directory: &Path, sessions: &Path) -> Result<Client<H::P>, Error> {
+    start_pinned::<H>(directory, sessions, None)
+}
+
+/// Starts the fixture's supervisor holding `pin`, as a launch on the Linux
+/// engine does.
+fn start_pinned<H: Harness>(
+    directory: &Path,
+    sessions: &Path,
+    pin: Option<&crate::voile::engine_patch::Pin>,
+) -> Result<Client<H::P>, Error> {
     let id = uuid::Uuid::new_v4().to_string();
     let account = H::account();
     Client::<H::P>::start_with(
@@ -346,6 +359,7 @@ fn start<H: Harness>(directory: &Path, sessions: &Path) -> Result<Client<H::P>, 
         Path::new("unused"),
         id.clone(),
         fixture_command::<H>(directory),
+        pin,
         probe,
         |pipe| H::handoff(directory, sessions, &id, pipe),
         |ack| ack.account_id == account,

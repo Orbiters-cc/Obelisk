@@ -204,3 +204,41 @@ fn the_game_keeps_the_helper_pid_its_environment_and_default_signals() {
     assert_eq!(proof.trim(), pid.to_string());
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+/// A game on the Linux engine gets the ends of its output's pipe through the
+/// helper it replaces, by the numbers its environment names.
+#[test]
+fn the_game_gets_the_ends_of_its_output_s_pipe() {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    let directory = scratch("game-pipe");
+    let (mut read, write) = std::io::pipe().unwrap();
+    let kept = read.try_clone().unwrap();
+    for end in [kept.as_raw_fd(), write.as_raw_fd()] {
+        // SAFETY: a descriptor of this test's, which it owns.
+        assert_eq!(unsafe { libc::fcntl(end, libc::F_SETFD, 0) }, 0);
+    }
+    let ends = format!("{} {}", kept.as_raw_fd(), write.as_raw_fd());
+    let mut helper = helper();
+    helper.env("OBELISK_LOG_PIPE", &ends);
+    let mut child = spawn(helper);
+    drop((kept, write));
+    admit(
+        &mut child,
+        &Admission {
+            executable: "/bin/bash".into(),
+            arguments: vec![
+                "-c".into(),
+                r#"read -r r w <<<"$OBELISK_LOG_PIPE"; : <&"$r" && echo guest >&"$w""#.into(),
+            ],
+            working_directory: directory.clone(),
+            log: None,
+            log_header: None,
+        },
+    );
+    assert!(child.wait().unwrap().success());
+    let mut told = String::new();
+    read.read_to_string(&mut told).unwrap();
+    assert_eq!(told, "guest\n");
+    std::fs::remove_dir_all(directory).unwrap();
+}

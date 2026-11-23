@@ -356,6 +356,7 @@ impl Play {
                     code,
                     message: format!("{sentence}: {reason}."),
                     key: question.error.clone(),
+                    engine: None,
                 });
             } else {
                 steps.push(PlayStep::Tell(Event::CloudPending { app_id, kind }));

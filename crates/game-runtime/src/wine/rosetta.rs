@@ -1,6 +1,8 @@
 //! Voile's Wine for macOS, which Rosetta runs: the engine of every Windows
 //! game whose Launch settings name no other.
-use super::{Adapter, Additions, Config, Facts, Furnisher, Game, Graphics, Prerequisite, Programs};
+use super::{
+    Adapter, Additions, Config, Facts, Furnisher, Game, Graphics, Pin, Prerequisite, Programs,
+};
 use crate::{
     launch::Error,
     supervisor::{Target, architecture::Architecture},
@@ -112,14 +114,16 @@ impl Adapter for RosettaWine {
         config: &Config,
         locations: &crate::Locations,
         storefront: &dyn Furnisher,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<Pin>, Error> {
         boot(config, &locations.home)?;
         storefront.furnish_prefix(config)?;
         install_prerequisites(config, &locations.home, &storefront.prerequisites_to_run()?)?;
         match config.log.parent() {
-            Some(logs) => Ok(crate::files::private_directory(logs)?),
-            None => Err(Error::Storage),
+            Some(logs) => crate::files::private_directory(logs)?,
+            None => return Err(Error::Storage),
         }
+        // Its runtime's files change only with a new release's folder.
+        Ok(None)
     }
 
     fn target(

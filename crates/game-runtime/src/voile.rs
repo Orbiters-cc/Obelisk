@@ -95,6 +95,9 @@ pub enum Failure {
     Storage,
     #[error("backend.voile.cancelled")]
     Cancelled,
+    /// A game runs on the runtime that would be replaced.
+    #[error("backend.voile.inUse")]
+    InUse,
 }
 impl From<std::io::Error> for Failure {
     fn from(_: std::io::Error) -> Self {
@@ -136,6 +139,12 @@ pub fn linux_runtime(root: &Path) -> Option<PathBuf> {
     }
     let linux = newest(root, &Offer::read(root))?.1.join(LINUX);
     has_engine(&linux).then_some(linux)
+}
+
+/// Whether the runtime Windows games run in is the one install-dev.sh put
+/// there, which no release replaces.
+pub fn is_development(root: &Path) -> bool {
+    development(root).is_some()
 }
 
 /// What each of this build's engine files is in the Linux engine of the Voile in `root`: `voile`, `ours` or `other`.
@@ -401,34 +410,97 @@ impl Install {
         self.install(root, &release, archive).await
     }
 
+    /// Installs again in `root` the release Windows games run in there, over
+    /// what is in place: its files, its Linux engine's and whatever an engine
+    /// update left. `archive` as in `run`. What is in place stays until the
+    /// whole release is there, checked; a game that runs in it stops this
+    /// (`InUse`). The development runtime is not a release: it is left.
+    pub async fn repair(&self, root: &Path, archive: Option<&Path>) -> Result<PathBuf, Failure> {
+        if archive.is_none() {
+            self.cancellable(feed::refresh(root)).await?;
+        }
+        let offer = Offer::read(root);
+        // The one in place, as far as what is left of it tells; else the one
+        // an install would take.
+        let release = match to_repair(root, &offer) {
+            Some(version) if version == release().version => release().clone(),
+            Some(version) => offer
+                .offered
+                .iter()
+                .find(|offered| offered.release.version == version)
+                .map_or_else(|| offer.wanted(), |offered| offered.release.clone()),
+            None => offer.wanted(),
+        };
+        self.put(root, &release, archive, true).await
+    }
+
     async fn install(
         &self,
         root: &Path,
         release: &Release,
         archive: Option<&Path>,
     ) -> Result<PathBuf, Failure> {
+        self.put(root, release, archive, false).await
+    }
+
+    /// Puts `release` in place in `root`; over one in place, whole or not,
+    /// when `again`.
+    async fn put(
+        &self,
+        root: &Path,
+        release: &Release,
+        archive: Option<&Path>,
+        again: bool,
+    ) -> Result<PathBuf, Failure> {
         let _installing = self.cancellable(INSTALLING.lock()).await?;
         if let Some(development) = development(root) {
             return Ok(development);
         }
         let destination = root.join(&release.version);
-        if holds(&destination, &release.version) {
+        if holds(&destination, &release.version) && !again {
             return Ok(destination);
+        }
+        // One process at a time installs into a library.
+        let _alone = self.cancellable(Self::alone(root)).await??;
+        if holds(&destination, &release.version) && !again {
+            return Ok(destination);
+        }
+        // Found before the download, checked again as it goes in place.
+        if destination.exists() {
+            let runtime = destination.clone();
+            blocking(move || engine_patch::Replacing::hold(&runtime))
+                .await?
+                .ok_or(Failure::InUse)?;
         }
         let extracted = self.extract(root, release, archive).await?;
         let runtime = extracted.path().join(format!("voile-{}", release.version));
         if !holds(&runtime, &release.version) {
             return Err(Failure::Damaged);
         }
-        tokio::task::spawn_blocking(move || {
-            if destination.exists() {
-                fs::remove_dir_all(&destination)?;
+        blocking(move || {
+            // The engine's files as the release ships them, or nothing is
+            // replaced: security software may have taken one meanwhile.
+            if has_engine(&runtime.join(LINUX)) && !engine_patch::pristine(&runtime.join(LINUX)) {
+                return Ok(Err(Failure::Damaged));
             }
-            fs::rename(&runtime, &destination)?;
-            Ok(destination)
+            match engine_patch::Replacing::hold(&destination)? {
+                Some(_held) => put_in_place(&runtime, &destination)?,
+                None => return Ok(Err(Failure::InUse)),
+            }
+            Ok(Ok(destination))
         })
-        .await
-        .map_err(|_| Failure::Storage)?
+        .await?
+    }
+
+    /// Waits until no other process installs into `root`.
+    async fn alone(root: &Path) -> Result<fs::File, Failure> {
+        fs::create_dir_all(root)?;
+        loop {
+            if let Some(held) = engine_patch::installing(root)? {
+                return Ok(held);
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
     }
 
     /// Checks `archive` (or downloads it) and extracts it into a folder of
@@ -533,6 +605,57 @@ impl Install {
     }
 }
 
+/// Runs `work`, which waits on locks or files, off the async runtime.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+) -> Result<T, Failure> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|_| Failure::Storage)?
+        .map_err(Failure::from)
+}
+
+/// The release a repair of `root` installs again: the one Windows games run in
+/// there, else the newest folder named after a release, whatever is missing
+/// in it.
+fn to_repair(root: &Path, offer: &Offer) -> Option<String> {
+    let named = |path: PathBuf| Some(path.file_name()?.to_string_lossy().into_owned());
+    if let Some((_, runtime)) = newest(root, offer) {
+        return named(runtime);
+    }
+    fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let order = numbers(&name)?;
+            (!offer.leaves(&name)).then_some((order, name))
+        })
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, name)| name)
+}
+
+/// Puts the extracted `runtime` at `destination`, in one step where there is
+/// something to replace, which then goes with the extraction's folder: there
+/// is no moment without a whole runtime at `destination`.
+fn put_in_place(runtime: &Path, destination: &Path) -> std::io::Result<()> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    if fs::symlink_metadata(destination).is_err() {
+        return fs::rename(runtime, destination);
+    }
+    if renameat_with(CWD, runtime, CWD, destination, RenameFlags::EXCHANGE).is_ok() {
+        return Ok(());
+    }
+    // A file system that exchanges nothing: the one in place goes aside, and
+    // back if the new one cannot take its place.
+    let aside = runtime.with_extension("replaced");
+    fs::rename(destination, &aside)?;
+    fs::rename(runtime, destination).inspect_err(|_| {
+        let _ = fs::rename(&aside, destination);
+    })
+}
+
 /// Removes the releases in `root` games no longer run in: all but the newest
 /// Obelisk runs, beside the development runtime, the last feed read, the
 /// player's choice of beta releases and unfinished installs. `runtimes` calls
@@ -545,18 +668,28 @@ pub fn remove_replaced(root: &Path) {
     let kept = kept
         .file_name()
         .map(|name| name.to_string_lossy().into_owned());
+    let mut held = Vec::new();
     remove_entries(root, |name| {
-        name != DEVELOPMENT
+        let replaced = name != DEVELOPMENT
             && Some(name) != kept.as_deref()
             && name != feed::KEPT
             && name != feed::PRERELEASES
-            && !name.starts_with(UNFINISHED)
+            && !name.starts_with(UNFINISHED);
+        // A release a game of any process still holds stays; one that goes
+        // is held until it is gone, so that no launch prepares in it.
+        if replaced && numbers(name).is_some() {
+            match engine_patch::Replacing::hold(&root.join(name)) {
+                Ok(Some(hold)) => held.push(hold),
+                Ok(None) | Err(_) => return false,
+            }
+        }
+        replaced
     });
 }
 
 /// Removes what `root` holds under the names `remove` picks. Whatever cannot be
 /// removed now goes with a later install.
-pub(crate) fn remove_entries(root: &Path, remove: impl Fn(&str) -> bool) {
+pub(crate) fn remove_entries(root: &Path, mut remove: impl FnMut(&str) -> bool) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
     };

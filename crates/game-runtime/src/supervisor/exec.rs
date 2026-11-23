@@ -8,6 +8,7 @@
 //! A confirmed exec starts the game; only reaping that child ends it.
 //! Inspection supplies durable identities, never permission to abandon a child.
 use super::{Error, Identity, StartingGame, Target};
+use crate::game_log::{Pipe, Writer};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -151,6 +152,8 @@ pub(crate) struct Helper {
     admission: Admission,
     /// The game's executable, as inspection names it once the helper became it.
     expected: PathBuf,
+    /// Where its guest writes its output, for a game on the Linux engine.
+    output: Option<Pipe>,
 }
 
 impl Helper {
@@ -181,21 +184,39 @@ impl Helper {
             pipe,
             admission,
             expected,
+            output: None,
         })
     }
 
-    /// Spawns the helper, which waits for its admission.
-    pub(crate) fn spawn(self) -> Result<Child, Error> {
-        let child = tokio::process::Command::from(self.command)
-            .kill_on_drop(false)
-            .spawn()
-            .map_err(|_| Error::StartFailed)?;
-        Ok(Child {
+    /// The game's guest writes its output into `pipe`, whose ends the helper
+    /// and the game it becomes get, named to them by their environment.
+    pub(crate) fn logged(mut self, pipe: Option<Pipe>) -> Self {
+        if let Some(pipe) = &pipe {
+            self.command.env(crate::game_log::ENDS, pipe.ends());
+        }
+        self.output = pipe;
+        self
+    }
+
+    /// Spawns the helper, which waits for its admission. What its guest
+    /// writes goes nowhere until the writer is told where.
+    pub(crate) fn spawn(self) -> Result<(Child, Option<Writer>), Error> {
+        let mut command = tokio::process::Command::from(self.command);
+        let mut spawn = || command.kill_on_drop(false).spawn().map_err(|_| Error::StartFailed);
+        let (child, writer) = match self.output {
+            Some(pipe) => {
+                let (child, writer) = pipe.inherited(&mut spawn)?;
+                (child?, Some(writer))
+            }
+            None => (spawn()?, None),
+        };
+        let child = Child {
             child,
             pipe: Some(self.pipe),
             admission: self.admission,
             expected: self.expected,
-        })
+        };
+        Ok((child, writer))
     }
 }
 

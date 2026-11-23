@@ -424,13 +424,16 @@ impl<P: Provider> Client<P> {
 
     /// Spawns a supervisor and hands it the launch. `handoff` writes the
     /// storefront's request, including any credentials, to the private pipe;
-    /// `acknowledges` checks that the reply describes that launch.
+    /// `acknowledges` checks that the reply describes that launch. `pin`, what
+    /// holds the engine files of a launch on the Linux engine, is its standard
+    /// output: the supervisor holds the same lock from its first instant.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn start_with(
         root: &Path,
         helper: &Path,
         id: String,
         mut command: Process,
+        pin: Option<&crate::voile::engine_patch::Pin>,
         probe: Probe,
         handoff: impl FnOnce(&mut UnixStream) -> Result<(), Error>,
         acknowledges: impl Fn(&Record<P>) -> bool,
@@ -454,9 +457,13 @@ impl<P: Provider> Client<P> {
         let (mut pipe, child_pipe) = UnixStream::pair()?;
         pipe.set_read_timeout(Some(Duration::from_secs(15)))?;
         pipe.set_write_timeout(Some(Duration::from_secs(3)))?;
+        let held = match pin {
+            Some(pin) => pin.stdio()?,
+            None => Stdio::null(),
+        };
         let mut child = command
             .stdin(Stdio::from(OwnedFd::from(child_pipe.try_clone()?)))
-            .stdout(Stdio::null())
+            .stdout(held)
             .stderr(Stdio::from(OwnedFd::from(child_pipe)))
             .spawn()
             .map_err(|_| Error::StartFailed)?;

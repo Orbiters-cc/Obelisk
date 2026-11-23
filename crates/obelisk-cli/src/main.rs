@@ -7,6 +7,7 @@
 //! same order, and keeps a library, a Steam session and a cache of its own.
 mod arguments;
 mod credentials;
+mod engine;
 mod events;
 mod failure;
 mod follow;
@@ -87,6 +88,7 @@ async fn dispatch(
             wait,
             session,
         } => steam.quit(app_id, force, wait, session).await,
+        Command::EngineRepair => engine::repair(Path::new(&places.locations().voile), places, None, out).await,
         Command::Prereleases(take) => prereleases(places, take).map(|event| out.emit(event)),
     }
 }
@@ -108,9 +110,7 @@ fn status(places: &Places, store: &dyn CredentialStore) -> Event {
             prereleases: game_runtime::voile::takes_prereleases(Path::new(&locations.voile)),
             keyboard_layout: game_runtime::voile::keyboard(Path::new(&locations.voile))
                 .map(game_runtime::voile::engine_patch::Keyboard::name),
-            engine_files: game_runtime::voile::engine_files(Path::new(&locations.voile)).map(|files| {
-                files.into_iter().map(|(path, state)| events::EngineFile { path, state }).collect()
-            }),
+            engine_files: engine::files(Path::new(&locations.voile)),
             installed: obelisk_bridge::installed_voile_release(locations),
         },
         helpers: places.helpers(),

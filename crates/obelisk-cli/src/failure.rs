@@ -2,6 +2,8 @@
 //! for whoever reads the log, and Obelisk's own reason when the engine gave
 //! one. docs/CLI.md lists every code.
 
+use game_runtime::voile::engine_patch::{Action, Incoherent};
+
 /// Every code a command fails with. A test checks docs/CLI.md names each.
 #[cfg(test)]
 pub const CODES: &[&str] = &[
@@ -37,6 +39,7 @@ pub const CODES: &[&str] = &[
     ROSETTA_REQUIRED,
     CLOUD_CONFLICT,
     CLOUD_SYNC_FAILED,
+    ENGINE_FILES,
     VOILE_FAILED,
     STEAM_COMPONENTS_FAILED,
     QUIT_FAILED,
@@ -77,6 +80,7 @@ pub const SESSION_FAILED: &str = "session_failed";
 pub const ROSETTA_REQUIRED: &str = "rosetta_required";
 pub const CLOUD_CONFLICT: &str = "cloud_conflict";
 pub const CLOUD_SYNC_FAILED: &str = "cloud_sync_failed";
+pub const ENGINE_FILES: &str = "engine_files";
 pub const VOILE_FAILED: &str = "voile_failed";
 pub const STEAM_COMPONENTS_FAILED: &str = "steam_components_failed";
 pub const QUIT_FAILED: &str = "quit_failed";
@@ -92,6 +96,40 @@ pub struct Failure {
     /// Obelisk's own reason, a localization key of its app such as
     /// `backend.steam.runtime.startFailed`, when the engine gave one.
     pub key: Option<String>,
+    /// The engine files no game starts on: under `engine_files`, and for a
+    /// runtime that lost one of its other files.
+    pub engine: Option<EngineFiles>,
+}
+
+/// Why no game starts on the Linux engine's files, and what ends it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct EngineFiles {
+    /// The files that are not what they must be, by their path in the engine;
+    /// none named when they are not known.
+    pub paths: Vec<String>,
+    pub reason: String,
+    /// `repair`, `quit_game` or `check_storage`.
+    pub action: String,
+}
+
+impl EngineFiles {
+    /// What an engine reason tells, when it is one about the engine's files.
+    fn read(key: &str, args: &[String]) -> Option<Self> {
+        match (key, args) {
+            (Incoherent::KEY, [reason, action, paths @ ..]) => Some(Self {
+                paths: paths.to_vec(),
+                reason: reason.clone(),
+                action: action.clone(),
+            }),
+            // A library of the runtime is gone: which one the engine does not say.
+            ("backend.runtime.wineIncomplete", _) => Some(Self {
+                paths: Vec::new(),
+                reason: "The runtime lacks a file a game cannot start without.".to_owned(),
+                action: Action::Repair.name().to_owned(),
+            }),
+            _ => None,
+        }
+    }
 }
 
 impl Failure {
@@ -100,18 +138,21 @@ impl Failure {
             code,
             message: message.into(),
             key: None,
+            engine: None,
         }
     }
 
     /// A failure the engine reported as `reason`: the code that reason
     /// always means, else `otherwise`, the code of what was being done.
     pub fn engine(otherwise: &'static str, reason: impl AsRef<str>) -> Self {
-        let (key, told) = read(reason.as_ref());
+        let (key, args, told) = read(reason.as_ref());
+        let engine = EngineFiles::read(&key, &args);
         let code = known(&key).unwrap_or(otherwise);
         Self {
             code,
             message: format!("{}: {told}", sentence(code)),
             key: Some(key),
+            engine,
         }
     }
 
@@ -122,10 +163,10 @@ impl Failure {
     }
 }
 
-/// An engine reason's key, and the reason as a log tells it. The engine
+/// An engine reason's key and arguments, and the reason as a log tells it. The engine
 /// gives a localization key, or a JSON object of a `key` and the `args` its
 /// sentence takes, each of which may be such a reason too.
-fn read(reason: &str) -> (String, String) {
+fn read(reason: &str) -> (String, Vec<String>, String) {
     #[derive(serde::Deserialize)]
     struct Message {
         key: String,
@@ -133,13 +174,13 @@ fn read(reason: &str) -> (String, String) {
         args: Vec<String>,
     }
     match serde_json::from_str::<Message>(reason) {
-        Ok(message) if message.args.is_empty() => (message.key.clone(), message.key),
+        Ok(message) if message.args.is_empty() => (message.key.clone(), Vec::new(), message.key),
         Ok(message) => {
-            let args: Vec<_> = message.args.iter().map(|arg| read(arg).1).collect();
+            let args: Vec<_> = message.args.iter().map(|arg| read(arg).2).collect();
             let told = format!("{} ({})", message.key, args.join(", "));
-            (message.key, told)
+            (message.key, message.args, told)
         }
-        Err(_) => (reason.to_owned(), reason.to_owned()),
+        Err(_) => (reason.to_owned(), Vec::new(), reason.to_owned()),
     }
 }
 
@@ -169,6 +210,8 @@ fn known(key: &str) -> Option<&'static str> {
         | "backend.voile.cancelled"
         | "cancelled" => CANCELLED,
         "backend.runtime.rosettaUnavailable" => ROSETTA_REQUIRED,
+        Incoherent::KEY => ENGINE_FILES,
+        "backend.voile.inUse" => BUSY,
         "backend.voile.downloadFailed"
         | "backend.voile.damaged"
         | "backend.voile.storageFailed" => VOILE_FAILED,
@@ -195,6 +238,7 @@ fn sentence(code: &str) -> &'static str {
         BUSY => "another operation holds the game",
         CANCELLED => "it was cancelled",
         ROSETTA_REQUIRED => "the game needs Rosetta, which is not installed",
+        ENGINE_FILES => "the files that run Windows games cannot start one",
         VOILE_FAILED => "the Voile runtime could not be installed",
         STEAM_COMPONENTS_FAILED => "Valve's Steam components could not be installed",
         INSTALL_FAILED => "the installation failed",
@@ -245,6 +289,27 @@ mod tests {
             failure.message,
             "the sign-in failed: backend.steam.auth.http (503, backend.steam.client.depot (42))"
         );
+    }
+
+    /// Fifth verification, finding 5: a refusal over the engine's files is a
+    /// code of its own, with every path and what ends it.
+    #[test]
+    fn the_engine_files_a_launch_is_refused_over_are_told() {
+        let reason = serde_json::json!({
+            "key": Incoherent::KEY,
+            "args": ["the engine files are not all of one release", "repair", "engine/wsd", "a path, with a comma"]
+        })
+        .to_string();
+        let failure = Failure::engine(LAUNCH_FAILED, &reason);
+        assert_eq!(failure.code, ENGINE_FILES);
+        let engine = failure.engine.unwrap();
+        assert_eq!(engine.paths, ["engine/wsd", "a path, with a comma"]);
+        assert_eq!(engine.reason, "the engine files are not all of one release");
+        assert_eq!(engine.action, "repair");
+        let gone = Failure::engine(LAUNCH_FAILED, "backend.runtime.wineIncomplete");
+        assert_eq!((gone.code, gone.engine.unwrap().action.as_str()), (LAUNCH_FAILED, "repair"));
+        assert_eq!(Failure::engine(LAUNCH_FAILED, "backend.voile.inUse").code, BUSY);
+        assert_eq!(Failure::engine(LAUNCH_FAILED, "backend.steam.runtime.startFailed").engine, None);
     }
 
     #[test]

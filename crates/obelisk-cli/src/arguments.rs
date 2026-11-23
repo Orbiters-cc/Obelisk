@@ -25,6 +25,7 @@ Commands:
   steam running                       List the live Game sessions
   steam quit <app_id> [--session <id>] [--force] [--wait <seconds>]
                                       Ask a running game to end
+  engine repair                       Install the Voile release in place again, checked
   settings prereleases on|off         Take Voile's pre-releases too, or not
 
 Options:
@@ -73,6 +74,7 @@ pub enum Command {
         /// Only the Game session with this ID is asked to end.
         session: Option<String>,
     },
+    EngineRepair,
     Prereleases(bool),
 }
 
@@ -194,6 +196,10 @@ fn command(mut words: Words, game: Vec<String>) -> Result<Command, Failure> {
         "--version" => return Ok(Command::Version),
         "status" => Command::Status,
         "steam" => steam(&mut words)?,
+        "engine" => match words.next().as_deref() {
+            Some("repair") => Command::EngineRepair,
+            _ => return Err(usage("engine takes repair.")),
+        },
         "settings" => settings(&mut words)?,
         other => return Err(usage(format!("{other} is not a command: see --help."))),
     };
@@ -407,6 +413,7 @@ mod tests {
                 session: Some("f2931045-90d3-4302-a8a9-94021747c54f".into())
             }
         );
+        assert_eq!(command_of(&["engine", "repair"]), Command::EngineRepair);
         assert_eq!(
             command_of(&["settings", "prereleases", "on"]),
             Command::Prereleases(true)
@@ -535,6 +542,9 @@ mod tests {
                 "carrier-pigeon",
             ],
             &["steam", "quit", "438100", "--wait", "soon"],
+            &["engine"],
+            &["engine", "mend"],
+            &["engine", "repair", "now"],
             &["settings", "prereleases"],
             &["settings", "prereleases", "maybe"],
             &["status", "now"],
@@ -558,6 +568,7 @@ mod tests {
             "steam play <app_id>",
             "steam running",
             "steam quit <app_id>",
+            "engine repair",
             "settings prereleases on|off",
         ] {
             assert!(HELP.contains(command), "{command}");

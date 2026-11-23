@@ -377,102 +377,22 @@ for pair in "$WSD wsd" "$DRIVER wineobelisk.so" "$SERVER virgl_render_server" "$
 done
 # The predecessors, from the authoritative inventory: every cli-v* release published on GitHub (Orbiters-cc/Obelisk),
 # its arm64 archive downloaded and the manifest built into its obelisk-cli read back. A release that cannot be listed,
-# downloaded or read stops the build: a predecessor is never skipped. The manifests of this checkout's history are
-# added (unreleased commits), never relied on alone: a shallow or untagged clone misses releases.
+# downloaded or read stops the build, and so does one in which no manifest is found unless it is named as one from
+# before the patch: a predecessor is never skipped. The manifests of this checkout's history are added (unreleased
+# commits), never relied on alone: a shallow or untagged clone misses releases.
+# (scripts/engine_patch_manifest.py, tested by scripts/test_engine_patch_manifest.py)
 HISTORY="$WORK/history"
-mkdir -p "$HISTORY" "$WORK/releases"
-RELEASES="$(gh release list --repo Orbiters-cc/Obelisk --limit 1000 --json tagName --jq '.[].tagName' | grep '^cli-v')" ||
-    fail "The releases of Orbiters-cc/Obelisk cannot be listed (gh): no patch written."
-[[ -n "$RELEASES" ]] || fail "No cli-v* release is listed: no patch written."
-for tag in $RELEASES; do
-    folder="$WORK/releases/$tag"
-    mkdir -p "$folder"
-    gh release download "$tag" --repo Orbiters-cc/Obelisk --pattern 'obelisk-cli-*-arm64.tar.gz' --dir "$folder" >/dev/null ||
-        fail "The archive of $tag cannot be downloaded: no patch written."
-    tar -xzf "$folder"/obelisk-cli-*-arm64.tar.gz -C "$folder" || fail "The archive of $tag cannot be read: no patch written."
-    binary="$(find "$folder" -type f -name obelisk-cli -perm -u+x | head -1)"
-    [[ -n "$binary" ]] || fail "The archive of $tag has no obelisk-cli: no patch written."
-    /usr/bin/python3 -I - "$binary" "$HISTORY/release-$tag.json" <<'PY' || fail "The manifest built into $tag cannot be read: no patch written."
-import json, sys
-data = open(sys.argv[1], "rb").read()
-found = None
-start = 0
-while True:
-    at = data.find(b'"voile":', start)
-    if at < 0:
-        break
-    brace = data.rfind(b"{", 0, at)
-    try:
-        value, _ = json.JSONDecoder().raw_decode(data[brace:].decode("utf-8", "replace"))
-        if isinstance(value, dict) and "files" in value and "voile" in value:
-            found = value
-            break
-    except ValueError:
-        pass
-    start = at + 1
-if found is None:
-    # a release from before the engine patch: none built in, said so in the history
-    json.dump({"voile": None, "files": []}, open(sys.argv[2], "w"))
-else:
-    json.dump(found, open(sys.argv[2], "w"))
-PY
-done
+mkdir -p "$HISTORY"
+MANIFEST_TOOL="$PROJECT_ROOT/scripts/engine_patch_manifest.py"
+/usr/bin/python3 -I "$MANIFEST_TOOL" collect "$HISTORY" || fail "The releases of Orbiters-cc/Obelisk cannot all be read: no patch written."
 for commit in $(git -C "$PROJECT_ROOT" log --format=%H -- crates/game-runtime/engine-patch/manifest.json); do
     git -C "$PROJECT_ROOT" show "$commit:crates/game-runtime/engine-patch/manifest.json" > "$HISTORY/$commit.json" ||
         fail "The manifest of $commit cannot be read: no patch written."
 done
-/usr/bin/python3 -I - "$WORK/out" "$LINUX" "$RELEASE" "$HISTORY" "$SOURCE_LKD" "$SOURCE_WINE" "$SOURCE_NEPTUNE" > "$WORK/manifest.json" <<'PY' ||
-import hashlib, json, os, sys
-out, linux, release, history = sys.argv[1:5]
-sources = {"voile-lkd": json.loads(sys.argv[5]), "voile-wine": json.loads(sys.argv[6]), "neptune": json.loads(sys.argv[7])}
-sha = lambda p: hashlib.sha256(open(p, "rb").read()).hexdigest()
-files = [("engine/wsd", "wsd"), ("wine/lib/wine/x86_64-unix/wineobelisk.so", "wineobelisk.so"),
-         ("graphics/libexec/virgl_render_server", "virgl_render_server"),
-         ("graphics/x86_64/libexec/virgl_render_server", "virgl_render_server-x86_64"),
-         ("engine/fexdarwin-run", "fexdarwin-run")]
-earlier = {}
-for name in sorted(os.listdir(history)):
-    m = json.load(open(os.path.join(history, name)))  # any unreadable one fails the build
-    if m.get("voile") != release:
-        continue
-    for f in m["files"]:
-        earlier.setdefault(f["path"], set()).update([f["patched"], *f.get("previous", [])])
-entries = []
-for path, source in files:
-    original, patched = sha(os.path.join(linux, path)), sha(os.path.join(out, source))
-    previous = sorted(earlier.get(path, set()) - {patched, original})
-    entries.append({"path": path, "source": source, "original": original, "patched": patched, "previous": previous})
-# The rule: every SHA-256 an earlier manifest had at a path is this one's, its original or listed.
-for path, digests in earlier.items():
-    entry = next((e for e in entries if e["path"] == path), None)
-    if entry is None:
-        sys.exit(f"{path} was patched before and is not now: its earlier files would block every other")
-    missing = digests - {entry["patched"], entry["original"], *entry["previous"]}
-    if missing:
-        sys.exit(f"{path}: earlier SHA-256s not listed: {sorted(missing)}")
-lines = ['{', f'  "voile": "{release}",', '  "sources": {']
-lines.append(",\n".join(f'    "{k}": ' + json.dumps(v).replace("{", "{ ").replace("}", " }") for k, v in sources.items()))
-lines += ['  },', '  "files": [']
-lines.append(",\n".join("    " + json.dumps(e) for e in entries))
-lines += ['  ]', '}']
-print("\n".join(lines))
-PY
+/usr/bin/python3 -I "$MANIFEST_TOOL" manifest "$WORK/out" "$LINUX" "$RELEASE" "$HISTORY" "$SOURCE_LKD" "$SOURCE_WINE" "$SOURCE_NEPTUNE" > "$WORK/manifest.json" ||
     fail "The manifest would not list every earlier file of ours: no patch written."
-/usr/bin/python3 -m json.tool "$WORK/manifest.json" >/dev/null || fail "The manifest written is not JSON."
 mv "$WORK/manifest.json" "$WORK/out/manifest.json"
-# The files the manifest names are the ones beside it.
-/usr/bin/python3 -I - "$WORK/out" <<'PY' || fail "The manifest does not name the files built: no patch written."
-import hashlib, json, os, sys
-out = sys.argv[1]
-m = json.load(open(os.path.join(out, "manifest.json")))
-for e in m["files"]:
-    assert hashlib.sha256(open(os.path.join(out, e["source"]), "rb").read()).hexdigest() == e["patched"], e["source"]
-assert sorted(os.listdir(out)) == sorted([e["source"] for e in m["files"]] + ["manifest.json"]), os.listdir(out)
-PY
-# Checked: the folder is replaced as one.
-rm -rf "$OUT.new" "$OUT.old"
-cp -R "$WORK/out" "$OUT.new"
-[[ -d "$OUT" ]] && mv "$OUT" "$OUT.old"
-mv "$OUT.new" "$OUT"
-rm -rf "$OUT.old"
+# The files the manifest names are the ones beside it; then the folder is exchanged with the one in place, in one step.
+/usr/bin/python3 -I "$MANIFEST_TOOL" check "$WORK/out" || fail "The manifest does not name the files built: no patch written."
+/usr/bin/python3 -I "$MANIFEST_TOOL" publish "$WORK/out" "$OUT" || fail "The patch could not be put in place: the one there is as it was."
 cat "$OUT/manifest.json"

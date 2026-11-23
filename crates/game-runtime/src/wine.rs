@@ -6,6 +6,7 @@
 use crate::{
     launch::Error,
     supervisor::{Target, architecture::Architecture},
+    voile::engine_patch::Pin,
 };
 use obelisk_core::{Platform, launch::LaunchTarget};
 use serde::{Deserialize, Serialize};
@@ -248,12 +249,14 @@ trait Adapter {
     /// Readies config's prefix for a game whose program is already checked:
     /// creates or updates it, has `storefront` furnish it, then makes the
     /// log's folder. Fails with WineUnavailable before the prefix is created.
+    /// Returns what holds the engine's files as this launch found them, for
+    /// an engine whose files may change.
     fn ready(
         &self,
         config: &Config,
         locations: &crate::Locations,
         storefront: &dyn Furnisher,
-    ) -> Result<(), Error>;
+    ) -> Result<Option<Pin>, Error>;
     /// How `program`, checked inside `game.install`, starts with
     /// `launched`'s arguments and working directory, behind the storefront's
     /// helper, with `environment`, the Game session's own.
@@ -453,7 +456,7 @@ fn prepare<S: Storefront>(
     install: &Path,
     target: &LaunchTarget,
     storefront: &S,
-) -> Result<(), Error> {
+) -> Result<Option<Pin>, Error> {
     program(install, target)?;
     config.adapter().ready(config, locations, storefront)
 }
@@ -520,6 +523,27 @@ pub(crate) fn windows_path(path: &Path) -> String {
     format!("Z:{}", path.to_string_lossy().replace('/', "\\"))
 }
 
+/// A Windows installation readied for one launch: how its game runs, and what
+/// holds its engine's files until the launch's supervisor does.
+#[derive(Debug)]
+pub struct Ready {
+    pub config: Config,
+    pub pin: Option<Pin>,
+}
+
+impl std::ops::Deref for Ready {
+    type Target = Config;
+    fn deref(&self) -> &Config {
+        &self.config
+    }
+}
+
+impl PartialEq for Ready {
+    fn eq(&self, other: &Self) -> bool {
+        self.config == other.config && self.pin.is_some() == other.pin.is_some()
+    }
+}
+
 /// One Windows installation: its game runs in Wine, in the installation's own
 /// prefix, where its saves live too. The prefix is readied before each launch
 /// and goes when the installation is uninstalled.
@@ -573,11 +597,11 @@ impl Installation {
         locations: &crate::Locations,
         target: &LaunchTarget,
         storefront: &S,
-    ) -> Result<Config, Error> {
+    ) -> Result<Ready, Error> {
         let config = self.runtime(locations)?;
         let target = self.settings.started(&self.install, target);
-        prepare(&config, locations, &self.install, &target, storefront)?;
-        Ok(config)
+        let pin = prepare(&config, locations, &self.install, &target, storefront)?;
+        Ok(Ready { config, pin })
     }
 
     /// How its game runs, once Voile is installed.

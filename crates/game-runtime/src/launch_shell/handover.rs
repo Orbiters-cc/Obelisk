@@ -79,7 +79,7 @@ fn ready<G: Launchable>(
     windows: &wine::Installation,
     configuration: &G::Configuration,
     locations: &Locations,
-) -> Result<wine::Config, G::Error> {
+) -> Result<wine::Ready, G::Error> {
     let installed = G::installed(configuration)?;
     Ok(windows.ready(
         locations,
@@ -89,8 +89,9 @@ fn ready<G: Launchable>(
 }
 
 impl<G: Launchable, S: SignIn<G>> sessions::Handover<G> for Handover<G, S> {
-    /// The account, its credential, and how a Windows build runs.
-    type Prepared = (String, G::Credential, Option<wine::Config>);
+    /// The account, its credential, and how a Windows build runs, its
+    /// engine's files held: whatever drops it lets go of them.
+    type Prepared = (String, G::Credential, Option<wine::Ready>);
 
     fn platform(&self) -> Platform {
         G::build(&self.configuration).platform
@@ -133,15 +134,20 @@ impl<G: Launchable, S: SignIn<G>> sessions::Handover<G> for Handover<G, S> {
 
     fn start(
         self,
-        (account, credential, wine): Self::Prepared,
+        (account, credential, ready): Self::Prepared,
         status: OnlineStatus,
         cancel: CancelToken,
     ) -> Result<Arc<dyn Supervised<G>>, String> {
+        let (wine, pin) = match ready {
+            Some(wine::Ready { config, pin }) => (Some(config), pin),
+            None => (None, None),
+        };
         request::start::<G>(
             self.configuration,
             account,
             credential,
             wine,
+            pin.as_ref(),
             status,
             cancel,
         )

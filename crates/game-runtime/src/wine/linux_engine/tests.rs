@@ -899,7 +899,7 @@ fn smoke() {
 }
 
 /// Fourth verification, R6: a renderer that retries without end after its graphics went wrote 420 MB in five
-/// minutes. The launcher's bounded writer keeps the first 200 of a repeated line, then counts them, and passes every
+/// minutes. The session's bounded writer (`game_log`, until 0.1.8 a filter of the launcher's own) keeps the first 200 of a repeated line, then counts them, and passes every
 /// line the frame counters and the incident capture read as it is, in order; nothing is ever cut.
 #[test]
 fn a_flood_of_one_line_is_counted_and_the_counters_lines_pass() {
@@ -923,7 +923,11 @@ echo "the game's standard output"
     )
     .unwrap();
     fs::set_permissions(&flood, fs::Permissions::from_mode(0o755)).unwrap();
-    let output = Command::new("/bin/bash")
+    let path = root.join("game.log");
+    let log = crate::diagnostics::open_log(&path).unwrap();
+    let pipe = crate::game_log::Pipe::new().unwrap();
+    let mut command = Command::new("/bin/bash");
+    command
         .arg("-c")
         .arg(LAUNCHER)
         .arg("obelisk-linux-engine")
@@ -936,14 +940,21 @@ echo "the game's standard output"
         .env("PATH", "/usr/bin:/bin")
         .env("TMPDIR", &root)
         .env("OBELISK_TEST_ROOT", &root)
+        .env(crate::game_log::ENDS, pipe.ends())
         .stdin(Stdio::null())
-        .output()
-        .unwrap();
+        .stdout(Stdio::piped())
+        .stderr(log);
+    let (child, mut writer) = pipe.inherited(|| command.spawn()).unwrap();
+    writer.write_to(fs::OpenOptions::new().append(true).open(&path).unwrap());
+    let output = child.unwrap().wait_with_output().unwrap();
+    let lost = writer.finish();
     assert!(output.status.success(), "{:?}", output.status);
+    assert_eq!((lost.dropped, lost.unwritten), (0, 0), "{lost:?}");
     // The supervisor makes the log the launcher's standard error and discards its standard output: the writer's lines
-    // must reach standard error (the first run on a game lost them all to standard output), and the game's standard
-    // output stays where it went.
-    let log = String::from_utf8_lossy(&output.stderr).into_owned();
+    // and the launcher's own both reach the log (the first run on a game lost them all to standard output), and the
+    // game's standard output stays where it went.
+    let log = fs::read_to_string(&path).unwrap();
+    assert!(log.contains("obelisk-wait: the game's shell returned 0"), "{log:.500}");
     assert!(String::from_utf8_lossy(&output.stdout).contains("the game's standard output"));
     assert!(!log.contains("the game's standard output"));
     let repeated = log.lines().filter(|l| l.starts_with("npt: memfd receive failed")).count();
@@ -956,4 +967,54 @@ echo "the game's standard output"
     assert!(log.contains("npt: destroying Neptune context"));
     assert!(log.contains("an ordinary line"));
     assert!(log.len() < 64 << 10, "bounded: {} bytes", log.len());
+}
+
+/// Fifth verification, finding 6: a game's guest keeps its launcher's reading end of its output's pipe for as long as
+/// the game runs, so that a supervisor that is gone ends no game, and gets neither end but its own standard error;
+/// without a pipe it writes where its launcher does.
+#[test]
+fn a_game_outlives_the_reader_of_its_output() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_directory, root) = installation();
+    let runtime = recording_runtime(&root);
+    let guest = runtime.join("engine/fexdarwin-run");
+    fs::write(
+        &guest,
+        "#!/bin/sh\nfor n in 7 8 9; do (: <&$n) 2>/dev/null && echo $n >> \"$OBELISK_TEST_ROOT/open.txt\"; done\n\
+         sleep 0.5\ni=0\nwhile [ $i -lt 20000 ]; do echo \"line $i\" >&2; i=$((i + 1)); done\nexit 5\n",
+    )
+    .unwrap();
+    fs::set_permissions(&guest, fs::Permissions::from_mode(0o755)).unwrap();
+    let launcher = |ends: Option<String>, log: &Path| {
+        let mut command = Command::new("/bin/bash");
+        command
+            .arg("-c")
+            .arg(LAUNCHER)
+            .arg("obelisk-linux-engine")
+            .args([&runtime, &root.join("home"), &root.join("install")])
+            .arg("/opt/game")
+            .args(["--", "/opt/game/Game.exe"])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("TMPDIR", &root)
+            .env("OBELISK_TEST_ROOT", &root)
+            .envs(ends.map(|ends| (crate::game_log::ENDS, ends)))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(crate::diagnostics::open_log(log).unwrap());
+        command
+    };
+    let log = root.join("gone.log");
+    let pipe = crate::game_log::Pipe::new().unwrap();
+    let mut command = launcher(Some(pipe.ends()), &log);
+    let (child, writer) = pipe.inherited(|| command.spawn()).unwrap();
+    drop(writer);
+    assert_eq!(child.unwrap().wait().unwrap().code(), Some(5), "its own exit, not a signal's");
+    assert!(!root.join("open.txt").exists(), "{:?}", fs::read_to_string(root.join("open.txt")));
+    // Ends that are not there are none.
+    for ends in [None, Some("88 89".to_owned()), Some("x".to_owned())] {
+        let log = root.join("direct.log");
+        assert_eq!(launcher(ends, &log).spawn().unwrap().wait().unwrap().code(), Some(5));
+        assert!(fs::read_to_string(&log).unwrap().contains("line 19999"));
+    }
 }

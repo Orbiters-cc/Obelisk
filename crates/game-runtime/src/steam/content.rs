@@ -437,14 +437,11 @@ impl sessions::Handover<Steam> for Handover {
     ) -> Result<Arc<dyn Supervised<Steam>>, String> {
         request.status = status;
         let helper = request.config.helpers.join(crate::package::HOST);
-        let started = super::start(&helper, &self.credentials, request, &cancel)
+        // The request holds the engine's files until here: its supervisor
+        // inherited the same lock, or nothing started.
+        super::start(&helper, &self.credentials, request, &cancel)
             .map(|client| Arc::new(client) as Arc<dyn Supervised<Steam>>)
-            .map_err(|error| error.to_string());
-        // The supervisor pinned the engine files before its first record; or nothing started.
-        if let Some(windows) = &self.windows {
-            crate::voile::engine_patch::release_preparation(windows.prefix());
-        }
-        started
+            .map_err(|error| error.to_string())
     }
 }
 

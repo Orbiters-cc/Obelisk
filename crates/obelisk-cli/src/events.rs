@@ -1,7 +1,7 @@
 //! What a command tells the program that runs it: JSON Lines on standard
 //! output, one object per line, each with its `event`. Nothing else is ever
 //! written there. docs/CLI.md lists every event and its fields.
-use crate::failure::Failure;
+use crate::failure::{EngineFiles, Failure};
 use serde::Serialize;
 use std::{
     io::Write,
@@ -30,6 +30,8 @@ pub const NAMES: &[&str] = &[
     "exited",
     "session",
     "quit_requested",
+    "engine_repairing",
+    "engine_repaired",
     "settings",
     "error",
 ];
@@ -188,6 +190,17 @@ pub enum Event {
         app_id: u32,
         forced: bool,
     },
+    EngineRepairing {
+        bytes_done: u64,
+        bytes_total: u64,
+        fraction: Option<f64>,
+    },
+    EngineRepaired {
+        /// The Voile release laid again.
+        voile: Option<String>,
+        keyboard_layout: &'static str,
+        engine_files: Vec<EngineFile>,
+    },
     Settings {
         prereleases: bool,
     },
@@ -195,6 +208,9 @@ pub enum Event {
         code: &'static str,
         message: String,
         key: Option<String>,
+        /// Only when a game cannot start on the engine's files.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        engine: Option<EngineFiles>,
     },
 }
 
@@ -204,6 +220,7 @@ impl From<&Failure> for Event {
             code: failure.code,
             message: failure.message.clone(),
             key: failure.key.clone(),
+            engine: failure.engine.clone(),
         }
     }
 }
@@ -341,6 +358,18 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_over_the_engine_s_files_carries_them() {
+        let reason = r#"{"key":"backend.runtime.engineFiles","args":["why","repair","engine/wsd"]}"#;
+        let failure = Failure::engine(failure::LAUNCH_FAILED, reason);
+        let told: serde_json::Value = serde_json::from_str(&Event::from(&failure).line()).unwrap();
+        assert_eq!(told["code"], "engine_files");
+        assert_eq!(
+            told["engine"],
+            serde_json::json!({"paths": ["engine/wsd"], "reason": "why", "action": "repair"})
+        );
+    }
+
+    #[test]
     fn progress_passes_a_few_times_per_second_and_at_once_for_another_phase() {
         let throttle = Throttle::default();
         let start = Instant::now();
@@ -376,6 +405,18 @@ mod tests {
             Event::Preparing { app_id: 1 }.line(),
             Event::Starting { app_id: 1 }.line(),
             Event::Settings { prereleases: true }.line(),
+            Event::EngineRepairing {
+                bytes_done: 1,
+                bytes_total: 2,
+                fraction: Some(0.5),
+            }
+            .line(),
+            Event::EngineRepaired {
+                voile: None,
+                keyboard_layout: "mac",
+                engine_files: Vec::new(),
+            }
+            .line(),
             Event::SignedOut {
                 was_signed_in: false,
             }

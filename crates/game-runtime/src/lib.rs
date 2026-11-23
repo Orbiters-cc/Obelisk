@@ -6,6 +6,7 @@ pub mod diagnostics;
 mod easy_anti_cheat;
 pub mod epic;
 mod files;
+mod game_log;
 pub mod games_folder;
 pub mod gog;
 mod input;

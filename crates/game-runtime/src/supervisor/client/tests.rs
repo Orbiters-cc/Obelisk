@@ -162,6 +162,7 @@ impl<P: Sample> Fixture<P> {
             &self.helper,
             uuid::Uuid::new_v4().to_string(),
             Process::new("/obelisk-no-supervisor-fixture"),
+            None,
             inspect_table,
             |_| panic!("a refused launch never hands anything over"),
             |_| false,

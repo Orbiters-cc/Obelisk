@@ -61,6 +61,7 @@ fn native_supervisor_acknowledges_and_reports_preparation_failure_without_valve(
         Request {
             cloud: None,
             status: obelisk_core::OnlineStatus::default(),
+            pin: None,
             id: String::new(),
             root: root.0.join("sessions"),
             config: Config {
@@ -105,4 +106,91 @@ fn native_supervisor_acknowledges_and_reports_preparation_failure_without_valve(
         assert!(Instant::now() < deadline);
         after = Some(snapshot.revision);
     }
+}
+
+/// The real supervisor of a game on the Linux engine: accepted with the pin its
+/// preparation took, as the same open lock, and refused without it.
+#[test]
+fn native_supervisor_of_the_linux_engine_holds_the_pin_it_was_started_with() {
+    use game_runtime::{
+        protocol::Credentials,
+        steam::{Request, host::Config},
+        supervisor::Target,
+        voile::engine_patch,
+        wine,
+    };
+    use obelisk_core::transfer::CancelToken;
+    use std::path::PathBuf;
+    let root = std::env::temp_dir().join(format!("obelisk-pin-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let settings = || {
+        serde_json::from_value(serde_json::json!({
+            "engine": "Linux", "graphics": "Dxmt", "options": {"ray_tracing": true},
+            "executable": null, "bootstrapper": null, "profile_arguments": [], "arguments": [],
+            "variables": {}, "dll_overrides": {}, "performance_hud": false,
+        }))
+        .unwrap()
+    };
+    let release = root.join("Voile/v9.0.0-1");
+    let runtime = release.join("linux");
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::write(release.join("runtime.json"), r#"{"version":"v9.0.0-1"}"#).unwrap();
+    let helper = PathBuf::from(env!("CARGO_BIN_EXE_obelisk-steam-host"));
+    let start = |name: &str, pin| {
+        let credentials = Credentials {
+            steam_id: 123,
+            account_name: "fixture".into(),
+            refresh_token: "fixture-no-steam-account".into(),
+        };
+        game_runtime::steam::start(
+            &helper,
+            &credentials,
+            Request {
+                cloud: None,
+                status: obelisk_core::OnlineStatus::default(),
+                pin,
+                id: String::new(),
+                root: root.join(name),
+                config: Config {
+                    cloud_save_roots: vec![],
+                    app_id: 42,
+                    helpers: helper.parent().unwrap().into(),
+                    package: root.join("missing.zip"),
+                    cache: root.join("cache"),
+                    diagnostics: root.join("logs"),
+                    steam_api: None,
+                    wine: Some(wine::Config {
+                        runtime: runtime.clone(),
+                        prefix: root.join("prefix"),
+                        log: root.join("wine.log"),
+                        settings: settings(),
+                    }),
+                    home: root.clone(),
+                },
+                target: Target {
+                    executable: root.join("must-not-run"),
+                    arguments: vec![],
+                    working_directory: root.clone(),
+                    environment: Default::default(),
+                    log: None,
+                    installation: None,
+                    program: None,
+                },
+            },
+            &CancelToken::new(),
+        )
+    };
+    let Err(refused) = start("without", None) else {
+        panic!("a launch without its pin was accepted")
+    };
+    assert_ne!(refused.to_string(), "");
+    let (_, pin) = engine_patch::apply(&runtime).unwrap();
+    let accepted = start("with", Some(pin)).unwrap();
+    // It was accepted (its preparation then fails: there is no Steam here).
+    let mut record = accepted.snapshot(None).unwrap();
+    assert_eq!(record.store.app_id, 42);
+    while !record.finished() {
+        record = accepted.snapshot(Some(record.revision)).unwrap();
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }

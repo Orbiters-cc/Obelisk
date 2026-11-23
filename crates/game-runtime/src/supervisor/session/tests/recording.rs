@@ -164,6 +164,10 @@ impl<const BEGIN: bool> Launch for Recorder<BEGIN> {
         ))
     }
 
+    fn wine(&self) -> Option<crate::wine::Config> {
+        self.script.wine.clone()
+    }
+
     async fn authenticate(&mut self, _: &Arc<Session<Recording>>) -> Result<(), Failure> {
         record(&self.directory, "authenticate");
         Ok(())
@@ -277,4 +281,173 @@ impl LaunchCloud<Failure> for Cloud {
 #[test]
 fn force_quitting_ends_what_the_game_left_running_apart_from_it() {
     super::force_quitting_ends_what_the_game_left_running_apart_from_it::<Recording>();
+}
+
+/// A launch on the Linux engine of a runtime in `root`: how it runs, and the
+/// runtime's folder.
+fn on_the_linux_engine(root: &Path) -> (crate::wine::Config, PathBuf) {
+    let release = root.join("Voile/v9.0.0-1");
+    let runtime = release.join("linux");
+    fs::create_dir_all(&runtime).unwrap();
+    fs::write(release.join("runtime.json"), r#"{"version":"v9.0.0-1"}"#).unwrap();
+    let mut config = crate::wine::tests::config(root);
+    config.settings.engine = crate::wine::Engine::Linux;
+    config.runtime = runtime;
+    (config, release)
+}
+
+fn held(release: &Path) -> bool {
+    crate::voile::engine_patch::Replacing::hold(release)
+        .unwrap()
+        .is_none()
+}
+
+/// Another test's child may hold an inherited lock for the moment before its
+/// exec.
+fn free(release: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while held(release) {
+        assert!(Instant::now() < deadline, "the runtime is still held");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Fifth verification, finding 2: the supervisor of a game on the Linux engine
+/// holds its preparation's own lock from its first instant to its game's exit,
+/// whatever becomes of the process that started it.
+#[test]
+fn a_supervisor_holds_its_preparation_s_pin_until_its_game_exits() {
+    let wine = tempfile::tempdir().unwrap();
+    let (config, release) = on_the_linux_engine(wine.path());
+    let (_, pin) = crate::voile::engine_patch::apply(&config.runtime).unwrap();
+    let (root, directory, sessions) = prepare(&Script {
+        wine: Some(config),
+        ..script(HELD)
+    });
+    let client = start_pinned::<Recording>(&directory, &sessions, Some(&pin)).unwrap();
+    let run = Run::<Recording> {
+        _root: root,
+        directory,
+        sessions,
+        client,
+    };
+    // The process that prepared it lets go, as it does by crashing.
+    drop(pin);
+    run.until(|record| record.phase == Phase::Running);
+    assert!(held(&release), "a running game's files are held");
+    run.release("release-game");
+    run.until(|record| record.finished());
+    free(&release);
+}
+
+/// Finding 2: the lock is the child's from its fork on, so that a parent lost
+/// before its supervisor did anything leaves no gap.
+#[test]
+fn a_pin_crosses_to_the_child_before_the_child_runs() {
+    let wine = tempfile::tempdir().unwrap();
+    let (config, release) = on_the_linux_engine(wine.path());
+    let (_, pin) = crate::voile::engine_patch::apply(&config.runtime).unwrap();
+    let mut child = Process::new("/bin/sleep")
+        .arg("60")
+        .stdout(pin.stdio().unwrap())
+        .spawn()
+        .unwrap();
+    drop(pin);
+    assert!(held(&release));
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(held(&release));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    free(&release);
+}
+
+/// Finding 2: a launch on the Linux engine whose supervisor was given no pin,
+/// or another runtime's, is never accepted: no record, no game.
+#[test]
+fn a_launch_on_the_linux_engine_without_its_pin_is_never_accepted() {
+    let wine = tempfile::tempdir().unwrap();
+    let (config, _) = on_the_linux_engine(wine.path());
+    let other = tempfile::tempdir().unwrap();
+    let (elsewhere, _) = on_the_linux_engine(other.path());
+    let (_, foreign) = crate::voile::engine_patch::apply(&elsewhere.runtime).unwrap();
+    for pin in [None, Some(&foreign)] {
+        let (_root, directory, sessions) = prepare(&Script {
+            wine: Some(config.clone()),
+            ..script(QUICK)
+        });
+        assert!(start_pinned::<Recording>(&directory, &sessions, pin).is_err());
+        assert!(!directory.join("ran").exists());
+        assert!(
+            crate::supervisor::journal::current::<Record<Recording>>(&sessions)
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+/// A game on the Linux engine that writes as its guest does: into the pipe its
+/// environment names, whose reading end it keeps as the launcher does.
+const WRITING: &str = r#"
+r=${OBELISK_LOG_PIPE% *}; w=${OBELISK_LOG_PIPE#* }
+eval "exec 7<&$r 8>&$w $r<&- $w>&-"
+echo "the guest begins" >&8
+printf ran > ran
+while [ ! -f release-game ]; do /bin/sleep 0.01; done
+i=0; while [ $i -lt 5000 ]; do echo "line $i" >&8; i=$((i+1)); done
+echo "the guest ends" >&8
+printf done > wrote
+exit 3
+"#;
+
+fn writing() -> (tempfile::TempDir, Run<Recording>) {
+    let wine = tempfile::tempdir().unwrap();
+    let (config, _) = on_the_linux_engine(wine.path());
+    let (_, pin) = crate::voile::engine_patch::apply(&config.runtime).unwrap();
+    let (root, directory, sessions) = prepare(&Script {
+        wine: Some(config),
+        ..script(WRITING)
+    });
+    // (the fixture's helper opens no log)
+    fs::write(directory.join("game.log"), "").unwrap();
+    let client = start_pinned::<Recording>(&directory, &sessions, Some(&pin)).unwrap();
+    let run = Run::<Recording> {
+        _root: root,
+        directory,
+        sessions,
+        client,
+    };
+    (wine, run)
+}
+
+/// Fifth verification, finding 6: what a guest writes reaches its log through
+/// its supervisor, the last of it before the session's record says it ended.
+#[test]
+fn what_a_guest_writes_reaches_its_log_through_its_supervisor() {
+    let (_wine, run) = writing();
+    run.until(|record| record.phase == Phase::Running);
+    run.release("release-game");
+    run.until(|record| record.finished());
+    let log = fs::read_to_string(run.directory.join("game.log")).unwrap();
+    assert!(log.starts_with("the guest begins\n"), "{log:.200}");
+    assert!(log.contains("line 199\n") && log.contains("the guest ends\n"), "{log:.200}");
+    assert!(log.contains("[obelisk-log: 5000 lines like this in all: line #]"), "{log:.200}");
+    assert_eq!(run.client.snapshot(None).unwrap().exit_code, Some(3));
+}
+
+/// Finding 6: a game outlives the supervisor that reads what it writes.
+#[test]
+fn a_guest_outlives_its_supervisor() {
+    let (_wine, run) = writing();
+    let record = run.until(|record| record.phase == Phase::Running);
+    run.wait_for("ran");
+    assert!(
+        Process::new("/bin/kill")
+            .args(["-KILL", &record.supervisor.pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::thread::sleep(Duration::from_millis(200));
+    run.release("release-game");
+    run.wait_for("wrote");
 }
