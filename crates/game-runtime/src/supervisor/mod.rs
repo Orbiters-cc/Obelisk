@@ -200,6 +200,9 @@ pub struct Record<P: Provider> {
     /// quit that does not finish from a game that never heard it, whatever the game itself can still log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quit_accepted: Option<crate::boot_clock::BootInstant>,
+    /// Why the running game's log does not hold what the game wrote. A log never refuses a game.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_failure: Option<String>,
 }
 impl<P: Provider> Record<P> {
     /// Whether the game or starting process this record owns still lives.

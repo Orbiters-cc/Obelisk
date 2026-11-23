@@ -2,6 +2,7 @@ use super::*;
 use crate::launch_settings::Settings;
 use crate::wine;
 use crate::wine::tests::{installation, pe, target as launch_target};
+use std::os::fd::AsRawFd;
 
 fn linux_config(root: &Path) -> wine::Config {
     wine::Config {
@@ -925,7 +926,8 @@ echo "the game's standard output"
     fs::set_permissions(&flood, fs::Permissions::from_mode(0o755)).unwrap();
     let path = root.join("game.log");
     let log = crate::diagnostics::open_log(&path).unwrap();
-    let pipe = crate::game_log::Pipe::new().unwrap();
+    let (end, mut writer) = crate::game_log::open(Stdio::null()).unwrap();
+    let end = inheritable(end);
     let mut command = Command::new("/bin/bash");
     command
         .arg("-c")
@@ -940,13 +942,14 @@ echo "the game's standard output"
         .env("PATH", "/usr/bin:/bin")
         .env("TMPDIR", &root)
         .env("OBELISK_TEST_ROOT", &root)
-        .env(crate::game_log::ENDS, pipe.ends())
+        .env(crate::game_log::END, end.as_raw_fd().to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(log);
-    let (child, mut writer) = pipe.inherited(|| command.spawn()).unwrap();
+    let child = command.spawn().unwrap();
+    drop(end);
     writer.write_to(fs::OpenOptions::new().append(true).open(&path).unwrap());
-    let output = child.unwrap().wait_with_output().unwrap();
+    let output = child.wait_with_output().unwrap();
     let lost = writer.finish();
     assert!(output.status.success(), "{:?}", output.status);
     assert_eq!((lost.dropped, lost.unwritten), (0, 0), "{lost:?}");
@@ -969,9 +972,16 @@ echo "the game's standard output"
     assert!(log.len() < 64 << 10, "bounded: {} bytes", log.len());
 }
 
-/// Fifth verification, finding 6: a game's guest keeps its launcher's reading end of its output's pipe for as long as
-/// the game runs, so that a supervisor that is gone ends no game, and gets neither end but its own standard error;
-/// without a pipe it writes where its launcher does.
+/// `end` as the exec helper leaves it to the launcher: kept through an exec.
+fn inheritable(end: std::os::fd::OwnedFd) -> std::os::fd::OwnedFd {
+    let end = rustix::io::fcntl_dupfd_cloexec(&end, crate::game_log::LOWEST).unwrap();
+    rustix::io::fcntl_setfd(&end, rustix::io::FdFlags::empty()).unwrap();
+    end
+}
+
+/// Fifth verification, finding 6: a supervisor that is gone ends no game, nor holds it up, and the guest gets no end
+/// of the pipe but its own standard error; without a pipe it writes where its launcher does. Sixth: a log that could
+/// not be set up, or an end that is not there, is nothing, never the uncapped log itself.
 #[test]
 fn a_game_outlives_the_reader_of_its_output() {
     use std::os::unix::fs::PermissionsExt;
@@ -998,23 +1008,25 @@ fn a_game_outlives_the_reader_of_its_output() {
             .env("PATH", "/usr/bin:/bin")
             .env("TMPDIR", &root)
             .env("OBELISK_TEST_ROOT", &root)
-            .envs(ends.map(|ends| (crate::game_log::ENDS, ends)))
+            .envs(ends.map(|ends| (crate::game_log::END, ends)))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(crate::diagnostics::open_log(log).unwrap());
         command
     };
     let log = root.join("gone.log");
-    let pipe = crate::game_log::Pipe::new().unwrap();
-    let mut command = launcher(Some(pipe.ends()), &log);
-    let (child, writer) = pipe.inherited(|| command.spawn()).unwrap();
+    let (end, writer) = crate::game_log::open(Stdio::null()).unwrap();
+    let end = inheritable(end);
+    let mut child = launcher(Some(end.as_raw_fd().to_string()), &log).spawn().unwrap();
+    drop(end);
     drop(writer);
-    assert_eq!(child.unwrap().wait().unwrap().code(), Some(5), "its own exit, not a signal's");
+    assert_eq!(child.wait().unwrap().code(), Some(5), "its own exit, not a signal's");
     assert!(!root.join("open.txt").exists(), "{:?}", fs::read_to_string(root.join("open.txt")));
-    // Ends that are not there are none.
-    for ends in [None, Some("88 89".to_owned()), Some("x".to_owned())] {
+    for end in [None, Some("88"), Some("x"), Some("88 89"), Some("none")] {
         let log = root.join("direct.log");
-        assert_eq!(launcher(ends, &log).spawn().unwrap().wait().unwrap().code(), Some(5));
-        assert!(fs::read_to_string(&log).unwrap().contains("line 19999"));
+        assert_eq!(launcher(end.map(str::to_owned), &log).spawn().unwrap().wait().unwrap().code(), Some(5));
+        let log = fs::read_to_string(&log).unwrap();
+        assert_eq!(log.contains("line 19999"), end.is_none(), "{end:?}");
+        assert!(log.contains("obelisk-wait: the game's shell returned 5"), "{end:?}: the launcher's own");
     }
 }

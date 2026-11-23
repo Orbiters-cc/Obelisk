@@ -21,17 +21,18 @@
 # OBELISK_APP_NAME names the game in the menu bar, the Dock and Cmd-Tab.
 set -u
 # The guest's standard error goes to the supervisor, which filters and bounds it into the game's log, through a pipe
-# whose writing end never blocks (game_log.rs; OBELISK_LOG_PIPE names its reading and writing ends): a line that finds
-# it full is lost, and the game goes on. This script keeps the reading end, unread, until the game is gone, so that a
-# supervisor that is gone first is a full pipe, never a broken one, which would end the game. Without one, the guest
-# writes where this script does. The programs started here write to the log itself, and get none of these.
-log_ends=${OBELISK_LOG_PIPE-}
+# that is always read, whatever becomes of the supervisor (game_log.rs; OBELISK_LOG_PIPE names its writing end). An end
+# that is not there, or "none", is a log that could not be set up: the guest then writes to nothing. Without the
+# variable it writes where this script does. The programs started here write to the log itself, and never get the end.
+log_end=${OBELISK_LOG_PIPE-}
 unset OBELISK_LOG_PIPE
-exec 9>&2
-if [[ $log_ends =~ ^([0-9]{2,3})\ ([0-9]{2,3})$ ]] && { : <&"${BASH_REMATCH[1]}"; } 2>/dev/null &&
-    { : >&"${BASH_REMATCH[2]}"; } 2>/dev/null; then
-    exec 7<&"${BASH_REMATCH[1]}" 9>&"${BASH_REMATCH[2]}"
-    eval "exec ${BASH_REMATCH[1]}<&- ${BASH_REMATCH[2]}>&-"
+if [ -z "$log_end" ]; then
+    exec 9>&2
+elif [[ $log_end =~ ^[0-9]{2,3}$ ]] && { : >&"$log_end"; } 2>/dev/null; then
+    exec 9>&"$log_end"
+    eval "exec $log_end>&-"
+else
+    exec 9>/dev/null
 fi
 # The Steam host's discovery adapter is for macOS games; no process here needs it. On a Mac with SIP off, dyld also
 # inserts it into the system tools this script runs (mkdir, tr, tail), which are arm64e and abort without that slice.
@@ -177,7 +178,7 @@ else
     render=$(render_server "$runtime/graphics/libexec/virgl_render_server" dxmt) || exit 1
 fi
 
-"$app/Contents/MacOS/wsd" --dir "$sockets" ${render_percent:+--render-percent "$render_percent"} 7<&- 9>&- &
+"$app/Contents/MacOS/wsd" --dir "$sockets" ${render_percent:+--render-percent "$render_percent"} 9>&- &
 helpers+=($!)
 if [ "$graphics" = d3dmetal ]; then
     # D3DMetal is an Intel library: the Intel render server runs it under Rosetta. d3dmetal-native loads the
@@ -190,19 +191,19 @@ if [ "$graphics" = d3dmetal ]; then
     RENDER_SERVER_EXEC_PATH="$render" NPT_BACKEND=d3dmetal DMN_RESIDENCY_SET=0 \
         NPT_D3D11_LIBRARY_PATH="$d3dmetal" NPT_DXGI_LIBRARY_PATH="$d3dmetal" NPT_D3D12_LIBRARY_PATH="$d3dmetal" \
         D3DMETAL_FRAMEWORK_PATH="$runtime/../lib/external/D3DMetal.framework" \
-        "$server/bin/virgl_test_server" --no-virgl --no-fork --socket-path "$sockets/vtest.sock" 7<&- 9>&- &
+        "$server/bin/virgl_test_server" --no-virgl --no-fork --socket-path "$sockets/vtest.sock" 9>&- &
 else
     dxmt="$runtime/graphics/dxmt-native.framework/Versions/A/dxmt-native"
     RENDER_SERVER_EXEC_PATH="$render" NPT_BACKEND=dxmt \
         NPT_D3D11_LIBRARY_PATH="$dxmt" NPT_DXGI_LIBRARY_PATH="$dxmt" NPT_D3D12_LIBRARY_PATH="$dxmt" \
-        "$runtime/graphics/bin/virgl_test_server" --no-virgl --no-fork --socket-path "$sockets/vtest.sock" 7<&- 9>&- &
+        "$runtime/graphics/bin/virgl_test_server" --no-virgl --no-fork --socket-path "$sockets/vtest.sock" 9>&- &
 fi
 helpers+=($!)
 # The input service gives the Mac's gamepads to Wine's Obelisk bus. A runtime without it starts the game without
 # gamepads.
 input=
 if [ -x "$runtime/engine/obelisk-input" ]; then
-    "$runtime/engine/obelisk-input" --dir "$sockets" 7<&- 9>&- &
+    "$runtime/engine/obelisk-input" --dir "$sockets" 9>&- &
     helpers+=($!)
     input=1
 fi
@@ -221,7 +222,7 @@ export FEXDARWIN_BIND="/opt/wine=$runtime/wine:ro;/home/user=$home;/opt/game=$in
 # Each of the two waits says when it returned (`obelisk-wait:` lines in the game's log), so that a quit that does not
 # finish shows which one it is stuck in.
 "$runtime/engine/fexdarwin-run" --cwd "$cwd" ${guest_env[@]+"${guest_env[@]}"} \
-    /bin/sh -c '/opt/wine/bin/wineserver -p0; /opt/wine/bin/wine "$@"; status=$?; echo "obelisk-wait: wine returned $status at $(date +%H:%M:%S.%N 2>/dev/null)" >&2; /opt/wine/bin/wineserver -w; echo "obelisk-wait: wineserver -w returned at $(date +%H:%M:%S.%N 2>/dev/null)" >&2; exit $status' sh "$@" 2>&9 7<&- 9>&- &
+    /bin/sh -c '/opt/wine/bin/wineserver -p0; /opt/wine/bin/wine "$@"; status=$?; echo "obelisk-wait: wine returned $status at $(date +%H:%M:%S.%N 2>/dev/null)" >&2; /opt/wine/bin/wineserver -w; echo "obelisk-wait: wineserver -w returned at $(date +%H:%M:%S.%N 2>/dev/null)" >&2; exit $status' sh "$@" 2>&9 9>&- &
 game=$!
 wait "$game"
 status=$?

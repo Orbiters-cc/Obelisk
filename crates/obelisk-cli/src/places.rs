@@ -129,9 +129,17 @@ impl Places {
         }
     }
 
-    /// Makes the library directory, and refuses one that is not a folder.
+    /// Makes the library directory, and refuses one that is not a folder. The
+    /// folder of its runtimes' locks comes with it: where it cannot be made,
+    /// what needs it says so.
     pub fn open_library(&self) -> Result<(), Failure> {
-        std::fs::create_dir_all(&self.library).map_err(|error| {
+        let opened = std::fs::create_dir_all(&self.library);
+        if opened.is_ok()
+            && let Err(error) = game_runtime::voile::engine_patch::provision(&self.library)
+        {
+            eprintln!("the engine's locks cannot be provided in {}: {error}", self.library.display());
+        }
+        opened.map_err(|error| {
             Failure::new(
                 LIBRARY_UNAVAILABLE,
                 format!(

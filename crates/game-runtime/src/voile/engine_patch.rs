@@ -19,11 +19,14 @@
 //! games run as Voile ships them.
 //!
 //! Files change as one recorded transaction and never under a running game:
-//! [`Pin`]. The locks live beside the runtimes' folder ([`Locks`]), outside
-//! every folder an install replaces, and the installer takes the same ones
-//! ([`Replacing`]).
+//! [`Pin`] keeps every other process of this build away at once, and what
+//! proves that none runs is a look at the library's Game sessions and at the
+//! processes running its files (`live.rs`), under the exclusive lock. The
+//! locks live beside the runtimes' folder ([`Locks`]), outside every folder
+//! an install replaces, and the installer takes the same ones ([`Replacing`]).
 use serde::{Deserialize, Serialize};
 use std::{
+    cell::OnceCell,
     collections::{BTreeMap, BTreeSet},
     fs,
     io::{self, Write},
@@ -83,6 +86,8 @@ pub(crate) struct Patch {
     files: Vec<File>,
     /// The sets an earlier published obelisk-cli left, each the SHA-256 of every file of `files`, in order.
     published: Vec<Vec<String>>,
+    /// Proves that nothing of the engine of the library of these runtimes runs.
+    idle: fn(&Path) -> Result<(), String>,
 }
 
 struct File {
@@ -112,6 +117,7 @@ fn built_in() -> &'static Patch {
         Patch {
             release: manifest.voile,
             published,
+            idle: super::live::idle,
             files: manifest
                 .files
                 .into_iter()
@@ -205,6 +211,19 @@ pub struct Incoherent {
 }
 
 impl Incoherent {
+    /// What a Linux engine `runtime` cannot start without is gone from it.
+    pub(crate) fn missing(runtime: &Path, paths: Vec<String>) -> Self {
+        let release = crate::voile::release_of(runtime);
+        let release = release.as_deref().unwrap_or("in place");
+        Self {
+            paths,
+            reason: format!(
+                "an engine file is missing. No game starts on these engine files until this is resolved: reinstall Voile's release {release} (obelisk-cli engine repair)"
+            ),
+            action: Action::Repair,
+        }
+    }
+
     /// The localization key of a refusal, whose arguments are the reason, the action, then the paths.
     pub const KEY: &'static str = "backend.runtime.engineFiles";
 
@@ -234,13 +253,29 @@ struct Locks {
     linux: PathBuf,
 }
 
+/// Makes the folder of the locks of `library`'s runtimes, as an install does: a library that can be written once
+/// never needs to be again for its runtimes to be held.
+pub fn provision(library: &Path) -> io::Result<()> {
+    let root = library.join(super::ROOT);
+    let folder = match root.canonicalize() {
+        Ok(_) => locks_folder(&root)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => locks_folder_named(&library.canonicalize()?, super::ROOT.as_ref()),
+        Err(error) => return Err(error),
+    };
+    fs::create_dir_all(folder)
+}
+
+fn locks_folder_named(library: &Path, name: &std::ffi::OsStr) -> PathBuf {
+    let mut locks = name.to_owned();
+    locks.push(".locks");
+    library.join(locks)
+}
+
 /// Where the locks of the runtimes in `root` are.
 fn locks_folder(root: &Path) -> io::Result<PathBuf> {
     let root = root.canonicalize()?;
     let name = root.file_name().ok_or(io::ErrorKind::InvalidInput)?;
-    let mut locks = name.to_owned();
-    locks.push(".locks");
-    Ok(root.with_file_name(locks))
+    Ok(locks_folder_named(root.parent().ok_or(io::ErrorKind::InvalidInput)?, name))
 }
 
 impl Locks {
@@ -271,13 +306,10 @@ impl Locks {
         let file = open_lock(&self.folder.join(format!("{}.writer.lock", self.name)))?;
         file.lock()?;
         // Only where one is: an older build made it, and only an older build waits on it.
-        let legacy = match fs::OpenOptions::new().read(true).write(true).open(self.linux.join(LEGACY_WRITER)) {
-            Ok(legacy) => {
-                legacy.lock()?;
-                Some(legacy)
-            }
-            Err(_) => None,
-        };
+        let legacy = open_legacy(&self.linux.join(LEGACY_WRITER))?;
+        if let Some(legacy) = &legacy {
+            legacy.lock()?;
+        }
         Ok(Writer { _file: file, _legacy: legacy })
     }
 
@@ -286,11 +318,23 @@ impl Locks {
     }
 
     /// An older build's session lock, where there is one.
-    fn legacy_sessions(&self) -> Option<fs::File> {
-        fs::OpenOptions::new().read(true).write(true).open(self.linux.join(LEGACY_SESSIONS)).ok()
+    fn legacy_sessions(&self) -> io::Result<Option<fs::File>> {
+        open_legacy(&self.linux.join(LEGACY_SESSIONS))
     }
 }
 
+/// An older build's lock file, to hold and never to write; `None` only where there is no such file. One that is
+/// there and cannot be opened may be held by a game: that is an error.
+fn open_legacy(path: &Path) -> io::Result<Option<fs::File>> {
+    match fs::File::open(path) {
+        Ok(file) => Ok(Some(file)),
+        // (the engine's folder may not be there, or not be one)
+        Err(error) if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[derive(Debug)]
 struct Writer {
     _file: fs::File,
     _legacy: Option<fs::File>,
@@ -317,7 +361,8 @@ pub struct Pin {
 }
 
 impl Pin {
-    /// The held lock as a process's standard output: how a supervisor inherits it.
+    /// The held lock as a process's standard output: how a supervisor inherits it, and what drains its game's
+    /// output once it is gone (`game_log`).
     pub(crate) fn stdio(&self) -> io::Result<std::process::Stdio> {
         Ok(self.file.try_clone()?.into())
     }
@@ -344,7 +389,7 @@ impl Pin {
             fs::TryLockError::Error(error) => error,
             fs::TryLockError::WouldBlock => io::Error::other("the runtime's lock is not held"),
         })?;
-        let legacy = locks.legacy_sessions().filter(|file| file.try_lock_shared().is_ok());
+        let legacy = locks.legacy_sessions()?.filter(|file| file.try_lock_shared().is_ok());
         Ok(Self { file, _legacy: legacy })
     }
 
@@ -358,7 +403,8 @@ impl Pin {
     }
 }
 
-/// A runtime folder nobody runs and nobody else changes, held while it is replaced or removed.
+/// A runtime folder nobody else changes, held while one is put there, replaced or removed.
+#[derive(Debug)]
 pub(crate) struct Replacing {
     _writer: Writer,
     _sessions: fs::File,
@@ -366,15 +412,29 @@ pub(crate) struct Replacing {
 }
 
 impl Replacing {
-    /// Holds `runtime` (`<voile>/<release>`, there or not); `None` while a game's session holds it.
+    /// Holds `runtime` (`<voile>/<release>`) to replace or remove what is there; `None` while a game's session
+    /// holds it, anything of its library's engine runs, or that cannot be told.
     pub(crate) fn hold(runtime: &Path) -> io::Result<Option<Self>> {
+        let Some(held) = Self::free(runtime)? else {
+            return Ok(None);
+        };
+        let root = runtime.parent().ok_or(io::ErrorKind::InvalidInput)?;
+        if let Err(running) = super::live::idle(root) {
+            eprintln!("engine: {} is left as it is: {running}", runtime.display());
+            return Ok(None);
+        }
+        Ok(Some(held))
+    }
+
+    /// Holds `runtime`, where nothing is yet; `None` while a launch holds it.
+    pub(crate) fn free(runtime: &Path) -> io::Result<Option<Self>> {
         let locks = Locks::of_runtime(runtime)?;
         let writer = locks.writer()?;
         let sessions = locks.sessions()?;
         if !alone(&sessions)? {
             return Ok(None);
         }
-        let legacy = locks.legacy_sessions();
+        let legacy = locks.legacy_sessions()?;
         if let Some(legacy) = &legacy
             && !alone(legacy)?
         {
@@ -506,12 +566,7 @@ fn sync_dir(path: &Path) -> io::Result<()> {
         }
         SYNCS_LEFT.set(Some(left - 1));
     }
-    let folder = fs::File::open(path.parent().ok_or(io::ErrorKind::InvalidInput)?)?;
-    match folder.sync_all() {
-        Ok(()) => Ok(()),
-        // A file system without F_FULLFSYNC for a folder (a network or exFAT disk) still has fsync.
-        Err(_) => Ok(rustix::fs::fsync(&folder)?),
-    }
+    fs::File::open(path.parent().ok_or(io::ErrorKind::InvalidInput)?)?.sync_all()
 }
 
 /// The names a transaction uses beside a destination: tied to the transaction and to that destination.
@@ -655,7 +710,10 @@ impl Patch {
             Ok(held) => held,
             Err(error) => return Ok(Err(unlocked(error))),
         };
-        let legacy = locks.legacy_sessions();
+        let legacy = match locks.legacy_sessions() {
+            Ok(legacy) => legacy,
+            Err(error) => return Ok(Err(unlocked(error))),
+        };
         let exclusive = match alone(&sessions) {
             Ok(alone_here) => alone_here && legacy.as_ref().is_none_or(|legacy| alone(legacy).unwrap_or(false)),
             Err(error) => return Ok(Err(unlocked(error))),
@@ -666,68 +724,94 @@ impl Patch {
         Ok(done.and_then(|keyboard| {
             let _ = sessions.unlock();
             sessions.lock_shared().map_err(unlocked)?;
-            let legacy = legacy.filter(|legacy| {
+            // An older build changes only files it knows, and waits on its own lock alone: where it would find some
+            // to change (ours are all in place for it too), its lock is held with this one, made if need be.
+            let legacy = match legacy {
+                None if keyboard == Keyboard::Pending => open_lock(&linux.join(LEGACY_SESSIONS)).ok(),
+                legacy => legacy,
+            };
+            if let Some(legacy) = &legacy {
                 let _ = legacy.unlock();
-                legacy.try_lock_shared().is_ok()
-            });
+                legacy.lock_shared().map_err(unlocked)?;
+                if keyboard != Keyboard::Us {
+                    self.complete(linux)?;
+                }
+            }
             Ok((keyboard, Pin { file: sessions, _legacy: legacy }))
         }))
     }
 
-    fn under_locks(&self, linux: &Path, exclusive: bool, faults: Faults) -> Result<Result<Keyboard, Incoherent>, Crashed> {
+    /// The record of a transaction in `linux`, one this program can have written for the release there.
+    fn journal(&self, linux: &Path, release: Option<&str>) -> Result<Option<Journal>, Incoherent> {
+        let unreadable = |error: String| {
+            let what = format!("the record of an engine update cannot be read ({error})");
+            self.refuse(vec![JOURNAL.to_owned()], &what, Action::Repair)
+        };
+        let path = linux.join(JOURNAL);
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(unreadable(error.to_string())),
+            Ok(_) => {}
+        }
+        let bytes = fs::read(&path).map_err(|error| unreadable(error.to_string()))?;
+        let journal: Journal = serde_json::from_slice(&bytes).map_err(|error| unreadable(error.to_string()))?;
+        if release != Some(journal.release.as_str()) {
+            return Err(self.refuse(
+                vec![JOURNAL.to_owned()],
+                &format!(
+                    "an engine update for Voile {} was cut short in a runtime that is now {}",
+                    journal.release,
+                    release.unwrap_or("of no known release")
+                ),
+                Action::Repair,
+            ));
+        }
+        self.valid(&journal)?;
+        Ok(Some(journal))
+    }
+
+    /// `alone`: no session's lock is held by anyone else.
+    fn under_locks(&self, linux: &Path, alone: bool, faults: Faults) -> Result<Result<Keyboard, Incoherent>, Crashed> {
+        // The files change only once nothing of the library's engine is proven to run, looked at once and only when
+        // something is to change: a launch on files that need nothing waits for nothing.
+        let proven = OnceCell::new();
+        let exclusive = || {
+            *proven.get_or_init(|| {
+                let root = linux.parent().and_then(Path::parent);
+                let running = match root {
+                    Some(root) if alone => (self.idle)(root).err(),
+                    _ => Some("another launch holds it".to_owned()),
+                };
+                if let Some(running) = &running {
+                    eprintln!("engine patch: the files stay as they are: {running}");
+                }
+                running.is_none()
+            })
+        };
         // 1. The release first: nothing of another release is recovered or installed.
         let release = crate::voile::release_of(linux);
-        let journal_path = linux.join(JOURNAL);
-        match fs::symlink_metadata(&journal_path) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => {
+        let journal = match self.journal(linux, release.as_deref()) {
+            Ok(journal) => journal,
+            Err(refused) => return Ok(Err(refused)),
+        };
+        let managed = release.as_deref() == Some(self.release.as_str());
+        if let Some(journal) = &journal {
+            if !exclusive() {
+                // Only its cleanup may be pending: a complete set starts, and that waits.
+                if managed && let Ok(keyboard) = self.complete(linux) {
+                    return Ok(Ok(keyboard));
+                }
                 return Ok(Err(self.refuse(
                     vec![JOURNAL.to_owned()],
-                    &format!("the record of an engine update cannot be read ({error})"),
-                    Action::Repair,
+                    "an engine update was cut short while another game runs on this runtime",
+                    Action::QuitGame,
                 )));
             }
-            Ok(_) => {
-                let journal = match fs::read(&journal_path)
-                    .map_err(|e| e.to_string())
-                    .and_then(|bytes| serde_json::from_slice::<Journal>(&bytes).map_err(|e| e.to_string()))
-                {
-                    Ok(journal) => journal,
-                    Err(error) => {
-                        return Ok(Err(self.refuse(
-                            vec![JOURNAL.to_owned()],
-                            &format!("the record of an engine update cannot be read ({error})"),
-                            Action::Repair,
-                        )));
-                    }
-                };
-                if release.as_deref() != Some(journal.release.as_str()) {
-                    return Ok(Err(self.refuse(
-                        vec![JOURNAL.to_owned()],
-                        &format!(
-                            "an engine update for Voile {} was cut short in a runtime that is now {}",
-                            journal.release,
-                            release.as_deref().unwrap_or("of no known release")
-                        ),
-                        Action::Repair,
-                    )));
-                }
-                if let Err(incoherent) = self.valid(&journal) {
-                    return Ok(Err(incoherent));
-                }
-                if !exclusive {
-                    return Ok(Err(self.refuse(
-                        vec![JOURNAL.to_owned()],
-                        "an engine update was cut short while another game runs on this runtime",
-                        Action::QuitGame,
-                    )));
-                }
-                if let Err(incoherent) = self.recover(linux, &journal) {
-                    return Ok(Err(incoherent));
-                }
+            if let Err(incoherent) = self.recover(linux, journal) {
+                return Ok(Err(incoherent));
             }
         }
-        if release.as_deref() != Some(self.release.as_str()) {
+        if !managed {
             // Another release, or a development runtime: as it is, unless files of ours are in it.
             let ours: Vec<String> = self
                 .files
@@ -740,20 +824,29 @@ impl Patch {
             }
             return Ok(Ok(Keyboard::Us));
         }
-        if exclusive {
+        let mut found = self.found(linux);
+        if found.contains(&Found::Missing) && exclusive() {
             self.restore_sole_copies(linux);
-            let found = self.found(linux);
-            if self.keyboard_of(linux, &found) == Keyboard::Pending
-                && let Err(incoherent) = self.transaction(linux, &found, faults)?
-            {
-                return Ok(Err(incoherent));
-            }
+            found = self.found(linux);
+        }
+        if self.keyboard_of(linux, &found) == Keyboard::Pending
+            && exclusive()
+            && let Err(incoherent) = self.transaction(linux, &found, faults)?
+        {
+            return Ok(Err(incoherent));
         }
         // Whatever happened above (nothing, a switch, a full disk, another session's lock): one complete
         // generation, or no launch.
         let complete = self.complete(linux);
-        if exclusive && complete.is_ok() && !journal_path.exists() {
-            self.clean_leftovers(linux);
+        if complete.is_ok() && !linux.join(JOURNAL).exists() {
+            let left = self.leftovers(linux);
+            if !left.is_empty() && exclusive() {
+                for file in left {
+                    if fs::remove_file(&file).is_err() {
+                        eprintln!("engine patch: {} cannot be removed; it is not used", file.display());
+                    }
+                }
+            }
         }
         Ok(complete)
     }
@@ -773,22 +866,26 @@ impl Patch {
         }
     }
 
-    /// Of a set just proven complete: files an obelisk-cli before 0.1.8 kept aside (never installed while the
+    /// What a complete set no longer needs: files an obelisk-cli before 0.1.8 kept aside (never installed while the
     /// file at the destination is one of the set), transaction files of no pending transaction, and old
     /// temporaries. A set that is not complete keeps all of them: they may hold its only good copy.
-    fn clean_leftovers(&self, linux: &Path) {
+    fn leftovers(&self, linux: &Path) -> Vec<PathBuf> {
+        let mut left = Vec::new();
         let mut folders = BTreeSet::new();
         for file in &self.files {
             let path = linux.join(&file.path);
             let aside = aside_of(&path);
-            if aside.is_file() && fs::remove_file(&aside).is_err() {
-                eprintln!("engine patch: {} cannot be removed; it is not used", aside.display());
+            if aside.is_file() {
+                left.push(aside);
             }
             if let Some(folder) = path.parent() {
                 folders.insert(folder.to_owned());
             }
         }
-        let _ = fs::remove_file(linux.join(format!("{JOURNAL}.new")));
+        let temp = linux.join(format!("{JOURNAL}.new"));
+        if temp.exists() {
+            left.push(temp);
+        }
         for folder in folders {
             for entry in fs::read_dir(&folder).into_iter().flatten().flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
@@ -796,10 +893,11 @@ impl Patch {
                     && !name.starts_with(".obelisk-original-")
                     && !name.starts_with(".obelisk-engine-");
                 if leftover {
-                    let _ = fs::remove_file(entry.path());
+                    left.push(entry.path());
                 }
             }
         }
+        left
     }
 
     fn write_journal(&self, linux: &Path, journal: &Journal, writes: &mut usize, faults: Faults) -> io::Result<()> {
@@ -815,6 +913,14 @@ impl Patch {
         file.sync_all()?;
         fs::rename(&temp, &path)?;
         sync_dir(&path)
+    }
+
+    /// Removes the record of transaction `id`, and no other's.
+    fn abandon_journal(linux: &Path, id: &str) {
+        let written = fs::read(linux.join(JOURNAL)).ok().and_then(|bytes| serde_json::from_slice::<Journal>(&bytes).ok());
+        if written.is_some_and(|journal| journal.id == id) {
+            let _ = Self::remove_journal(linux);
+        }
     }
 
     fn remove_journal(linux: &Path) -> io::Result<()> {
@@ -856,7 +962,7 @@ impl Patch {
         let mut writes = 0;
         // A journal that cannot be written (a full disk): nothing changes, the launch runs on the set as it is.
         if self.write_journal(linux, &journal, &mut writes, faults).is_err() {
-            let _ = Self::remove_journal(linux);
+            Self::abandon_journal(linux, &id);
             return Ok(Ok(()));
         }
         if faults.crash_after == Some(Phase::Staging) {
@@ -869,7 +975,7 @@ impl Patch {
                 let _ = fs::remove_file(txn_name(&path, &id, "new"));
                 let _ = fs::remove_file(txn_name(&path, &id, "old"));
             }
-            let _ = Self::remove_journal(linux);
+            Self::abandon_journal(linux, &id);
         };
         for (index, file) in switch.iter().enumerate() {
             let path = linux.join(&file.path);
@@ -955,8 +1061,9 @@ impl Patch {
     }
 
     /// The record is one this program can have written: its id names files and nothing else, every path of the
-    /// set is there exactly once and no other, each `before` is a file that path may have had and each `after`
-    /// one of ours. Nothing is read or changed from a record that is not.
+    /// set is there exactly once and no other, each `before` is a file that path may have had, and the files
+    /// `after` are one published generation: an update puts nothing else in place. Nothing is read or changed
+    /// from a record that is not.
     fn valid(&self, journal: &Journal) -> Result<(), Incoherent> {
         let refuse = |what: String| {
             Err(self.refuse(vec![JOURNAL.to_owned()], &format!("the record of an engine update is not one: {what}"), Action::Repair))
@@ -979,10 +1086,20 @@ impl Patch {
                 return refuse(format!("the file after, at {}", file.path));
             }
         }
-        match journal.files.iter().find(|record| !self.files.iter().any(|file| file.path == record.path)) {
-            Some(_) => refuse("a path that is not of the set".to_owned()),
-            None => Ok(()),
+        if journal.files.iter().any(|record| !self.files.iter().any(|file| file.path == record.path)) {
+            return refuse("a path that is not of the set".to_owned());
         }
+        match self.generation(journal, |record| &record.after) {
+            true => Ok(()),
+            false => refuse("the files after it are no published set".to_owned()),
+        }
+    }
+
+    /// Whether the files a (valid) record names by `which` are one published generation.
+    fn generation(&self, journal: &Journal, which: impl Fn(&JournalFile) -> &String) -> bool {
+        let of = |file: &File| journal.files.iter().find(|record| record.path == file.path).map(&which);
+        let files: Option<Vec<&str>> = self.files.iter().map(|file| of(file).map(String::as_str)).collect();
+        files.is_some_and(|files| self.generations().contains(&files))
     }
 
     /// Ends a transaction a crash (or a failure) left: `Committed` only removes its kept originals; any other
@@ -990,7 +1107,8 @@ impl Patch {
     /// destination, checked by digest. Everything it needs is read and checked before the first file changes:
     /// a file or a kept original that is unreadable, missing, or not the digest the record names, is never
     /// guessed at, and nothing else is touched for it: refused, naming it, the record and the kept originals
-    /// left where they are.
+    /// left where they are. The kept originals and the record go only once the files are a published generation,
+    /// verified; any other set keeps them all (a later update that completes it, or a repair, ends them).
     fn recover(&self, linux: &Path, journal: &Journal) -> Result<(), Incoherent> {
         self.valid(journal)?;
         let mut problems = Vec::new();
@@ -1061,6 +1179,9 @@ impl Patch {
                 return refuse(vec![record.path.clone()], &format!("{} is not durable ({error})", path.display()));
             }
         }
+        if !self.generation(journal, |record| if journal.phase == Phase::Committed { &record.after } else { &record.before }) {
+            return Ok(());
+        }
         // Every file is its `before` (or, committed, its `after`): the transaction's own files go, then the record.
         for record in &journal.files {
             let path = linux.join(&record.path);
@@ -1077,10 +1198,10 @@ impl Patch {
         Ok(())
     }
 
-    /// Whether a runtime an install has just laid holds Voile's own files, every one: checked before it
-    /// replaces anything. A release the files are not for has nothing to check.
-    fn pristine(&self, linux: &Path) -> bool {
-        crate::voile::release_of(linux).as_deref() != Some(self.release.as_str())
+    /// Whether the Linux engine `linux` an install laid, of `release`, holds Voile's own files, every one: checked
+    /// before it replaces anything, and again in its place. A release the files are not for has nothing to check.
+    fn pristine(&self, linux: &Path, release: &str) -> bool {
+        release != self.release
             || self.files.iter().all(|file| matches!(read_sha(&linux.join(&file.path)), Ok(Some(sha)) if sha == file.original))
     }
 }
@@ -1110,9 +1231,14 @@ pub fn components(linux: &Path) -> Vec<(String, &'static str)> {
     built_in().components(linux)
 }
 
-/// Whether the Linux engine `linux` an install laid is whole, as its release ships it.
-pub(crate) fn pristine(linux: &Path) -> bool {
-    built_in().pristine(linux)
+/// Whether the Linux engine `linux` an install laid, of `release`, is whole, as its release ships it.
+pub(crate) fn pristine(linux: &Path, release: &str) -> bool {
+    built_in().pristine(linux, release)
+}
+
+/// The one Voile release the files are for: it carries a Linux engine, whatever is left of it.
+pub(crate) fn release() -> &'static str {
+    &built_in().release
 }
 
 /// Puts our engine files in place in `linux` when they are for its release and no game runs on it, before a
@@ -1202,6 +1328,7 @@ mod tests {
         };
         Patch {
             release: RELEASE.to_owned(),
+            idle: |_| Ok(()),
             // What an earlier build of ours left whole: the earlier files everywhere, and the one with Voile's server.
             published: vec![
                 vec![sha(b"our earlier server"); 3],
@@ -1514,7 +1641,7 @@ mod tests {
             }
             tried += 1;
         }
-        assert!(tried >= 7, "the cli-v0.1.2 to 0.1.8 tags");
+        assert!(tried >= 8, "the cli-v0.1.2 to 0.1.9 tags");
     }
     /// Fourth verification, finding 2: a crash at any point of a transaction is ended at the next launch from
     /// its record alone, and that launch starts on one complete set.
@@ -2024,7 +2151,7 @@ mod tests {
     fn the_published_generations_are_of_known_files() {
         let manifest: Manifest = serde_json::from_str(MANIFEST).unwrap();
         let releases: Vec<&str> = manifest.generations.iter().flat_map(|g| g.releases.iter().map(String::as_str)).collect();
-        for release in ["0.1.2", "0.1.3", "0.1.4", "0.1.5", "0.1.6", "0.1.7", "0.1.8"] {
+        for release in ["0.1.2", "0.1.3", "0.1.4", "0.1.5", "0.1.6", "0.1.7", "0.1.8", "0.1.9"] {
             assert!(releases.contains(&release), "{release}");
         }
         let patch = built_in();
@@ -2046,4 +2173,200 @@ mod tests {
         assert_eq!(one_set(&linux), "voile");
     }
 
+    /// Sixth verification, ruling 4 (the verifier's fixture): a record whose files `after` are no published set is
+    /// not one this program can have written: nothing is deleted from it, and no launch starts.
+    #[test]
+    fn a_committed_mixture_keeps_its_verified_predecessor() {
+        let (_root, linux) = runtime(RELEASE);
+        let patch = patch();
+        let mut record = journal(&linux, Phase::Committed, RELEASE);
+        record.files[1].after = sha(b"our earlier server");
+        for (index, file) in record.files.iter().enumerate() {
+            let target = linux.join(&file.path);
+            fs::copy(&target, txn_name(&target, &record.id, "old")).unwrap();
+            let bytes = if index == 1 { &b"our earlier server"[..] } else { patch.files[index].bytes };
+            fs::write(target, bytes).unwrap();
+        }
+        let record = record.write_to(&linux);
+        assert!(patch.recover(&linux, &record).is_err());
+        assert_eq!(patch.apply(&linux).unwrap_err().paths, [JOURNAL]);
+        assert!(record.files.iter().all(|file| txn_name(&linux.join(&file.path), &record.id, "old").exists()));
+        assert!(linux.join(JOURNAL).exists());
+    }
+
+    /// Ruling 4: an update undone to a set that is no published one (a mixture it was completing) keeps its record
+    /// and its kept originals, until a later one is whole.
+    #[test]
+    fn an_update_undone_to_a_mixture_keeps_everything() {
+        let (_root, linux) = runtime(RELEASE);
+        set(&linux, [b"our wsd", b"voile's driver", b"voile's server"]);
+        patch().crash(&linux, Faults { crash_after: Some(Phase::Switching), crash_switched: Some(1), ..Faults::default() });
+        let kept = |path: &str| {
+            let folder = linux.join(path).parent().unwrap().to_owned();
+            fs::read_dir(folder).unwrap().flatten().any(|entry| entry.file_name().to_string_lossy().contains("-old-"))
+        };
+        assert!(kept(DRIVER) && kept(SERVER));
+        // (a full disk: no new update can be recorded)
+        let refused = patch().with(&linux, Faults { journal_write: Some(0), ..Faults::default() }).unwrap_err();
+        assert_eq!((refused.paths, refused.action), (vec![WSD.to_owned()], Action::Repair));
+        assert!(kept(DRIVER) && kept(SERVER) && linux.join(JOURNAL).exists());
+        assert_eq!(bytes(&linux), [b"our wsd".as_slice(), b"voile's driver", b"voile's server"]);
+        assert_eq!(patch().apply(&linux).unwrap(), Keyboard::Mac);
+        no_leftovers(&linux);
+    }
+
+    /// Sixth verification, the legacy locks (the verifier's fixture): a lock of an older build that is there and
+    /// held is a game's, whatever its permissions; one that cannot be opened is an error, never "absent".
+    #[test]
+    fn an_older_build_s_lock_is_never_taken_for_absent() {
+        let (_root, linux) = runtime(RELEASE);
+        let release = linux.parent().unwrap().to_owned();
+        let path = linux.join(LEGACY_SESSIONS);
+        let old = open_lock(&path).unwrap();
+        old.lock_shared().unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
+        assert!(Replacing::hold(&release).unwrap().is_none());
+        assert_eq!(patch().apply(&linux).unwrap(), Keyboard::Pending, "and no update under it");
+        for path in [LEGACY_SESSIONS, LEGACY_WRITER] {
+            let path = linux.join(path);
+            drop(open_lock(&path));
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+            assert!(Replacing::hold(&release).is_err());
+            assert_eq!(patch().apply(&linux).unwrap_err().action, Action::CheckStorage);
+            assert_eq!(one_set(&linux), "voile");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        drop(old);
+        let mut free = None;
+        for _ in 0..200 {
+            free = Replacing::hold(&release).unwrap();
+            if free.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(free.is_some());
+    }
+
+    /// The same finding, the other way: where an older build would find files to change under a pinned game, its own
+    /// lock is made and held with the pin. (Ours in place, it finds none, and none is made.)
+    #[test]
+    fn an_older_build_cannot_write_under_a_pin_it_does_not_know() {
+        let (_root, linux) = runtime(RELEASE);
+        let session = Pin::hold(&linux).unwrap();
+        let (keyboard, pin) = patch().prepare(&linux).unwrap();
+        assert_eq!(keyboard, Keyboard::Pending);
+        let legacy = open_lock(&linux.join(LEGACY_SESSIONS)).unwrap();
+        assert!(!alone(&legacy).unwrap());
+        // The supervisor holds it too.
+        let inherited = Pin::adopt(&linux, pin.file.try_clone().unwrap()).unwrap();
+        drop((pin, session));
+        assert!(!alone(&legacy).unwrap());
+        drop(inherited);
+        free(&legacy);
+        legacy.unlock().unwrap();
+        assert_eq!(patch().apply(&linux).unwrap(), Keyboard::Mac);
+    }
+
+    /// Ruling 5: the locks' folder comes with the library, and never needs a library that can be written again.
+    #[test]
+    fn a_provisioned_library_never_needs_to_be_written_for_its_locks() {
+        for voile_there in [false, true] {
+            let library = tempfile::tempdir().unwrap();
+            if voile_there {
+                fs::create_dir(library.path().join("Voile")).unwrap();
+            }
+            provision(library.path()).unwrap();
+            provision(library.path()).unwrap();
+            assert!(library.path().join("Voile.locks").is_dir());
+            let release = library.path().join("Voile").join(RELEASE);
+            let linux = release.join("linux");
+            for (path, bytes) in [(WSD, "voile's wsd"), (DRIVER, "voile's driver"), (SERVER, "voile's server")] {
+                fs::create_dir_all(linux.join(path).parent().unwrap()).unwrap();
+                fs::write(linux.join(path), bytes).unwrap();
+            }
+            fs::write(release.join("runtime.json"), format!(r#"{{"version":"{RELEASE}"}}"#)).unwrap();
+            fs::set_permissions(library.path(), fs::Permissions::from_mode(0o555)).unwrap();
+            let done = patch().apply(&linux);
+            fs::set_permissions(library.path(), fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(done.unwrap(), Keyboard::Mac);
+        }
+        // Where the runtimes are a link, the locks are beside what it leads to.
+        let (library, disk) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        fs::create_dir(disk.path().join("Voile")).unwrap();
+        std::os::unix::fs::symlink(disk.path().join("Voile"), library.path().join("Voile")).unwrap();
+        provision(library.path()).unwrap();
+        assert!(disk.path().join("Voile.locks").is_dir());
+    }
+
+    /// Sixth verification: a complete set with only an update's cleanup pending starts while another game runs, and
+    /// the cleanup waits for it.
+    #[test]
+    fn a_complete_set_with_only_cleanup_pending_starts() {
+        let (_root, linux) = runtime(RELEASE);
+        for crash in [Phase::Committed, Phase::Staging] {
+            patch().crash(&linux, Faults { crash_after: Some(crash), ..Faults::default() });
+            let expected = if crash == Phase::Committed { Keyboard::Mac } else { Keyboard::Pending };
+            // The verifier's: an older build's session holds its lock.
+            fs::write(linux.join(LEGACY_SESSIONS), b"").unwrap();
+            let legacy = open_lock(&linux.join(LEGACY_SESSIONS)).unwrap();
+            legacy.lock_shared().unwrap();
+            assert_eq!(patch().apply(&linux).unwrap(), expected, "{crash:?}");
+            assert!(linux.join(JOURNAL).exists(), "{crash:?}: the cleanup waits");
+            drop(legacy);
+            // This build's.
+            let session = Pin::hold(&linux).unwrap();
+            assert_eq!(patch().apply(&linux).unwrap(), expected, "{crash:?}");
+            drop(session);
+            // A game no lock shows.
+            let running = Patch { idle: |_| Err("a game runs".into()), ..patch() };
+            assert_eq!(running.apply(&linux).unwrap(), expected, "{crash:?}");
+            assert!(linux.join(JOURNAL).exists());
+            assert_eq!(patch().apply(&linux).unwrap(), Keyboard::Mac);
+            no_leftovers(&linux);
+            set(&linux, [b"voile's wsd", b"voile's driver", b"voile's server"]);
+        }
+        // Half switched it is not complete: refused, with the same answer, and nothing changes.
+        patch().crash(&linux, Faults { crash_after: Some(Phase::Switching), crash_switched: Some(1), ..Faults::default() });
+        let before = bytes(&linux);
+        let running = Patch { idle: |_| Err("a game runs".into()), ..patch() };
+        assert_eq!(running.apply(&linux).unwrap_err().action, Action::QuitGame);
+        assert_eq!(bytes(&linux), before);
+    }
+
+    /// Ruling 2: whatever the locks say, no file changes while something of the library's engine runs, or when that
+    /// cannot be told; a launch on files that need nothing does not look.
+    #[test]
+    fn no_file_changes_while_something_of_the_engine_runs() {
+        let (_root, linux) = runtime(RELEASE);
+        let running = || Patch { idle: |_| Err("a game runs".into()), ..patch() };
+        assert_eq!(running().apply(&linux).unwrap(), Keyboard::Pending);
+        assert_eq!(one_set(&linux), "voile");
+        // A leftover, and a sole copy kept aside, stay where they are too.
+        fs::write(aside_of(&linux.join(WSD)), b"voile's wsd").unwrap();
+        fs::remove_file(linux.join(WSD)).unwrap();
+        assert!(running().apply(&linux).is_err());
+        assert!(aside_of(&linux.join(WSD)).exists() && !linux.join(WSD).exists());
+        assert_eq!(patch().apply(&linux).unwrap(), Keyboard::Mac);
+        fs::write(aside_of(&linux.join(WSD)), b"voile's wsd").unwrap();
+        assert_eq!(running().apply(&linux).unwrap(), Keyboard::Mac);
+        assert!(aside_of(&linux.join(WSD)).exists());
+        assert_eq!(patch().apply(&linux).unwrap(), Keyboard::Mac);
+        assert!(!aside_of(&linux.join(WSD)).exists());
+        let never = Patch { idle: |_| panic!("looked"), ..patch() };
+        assert_eq!(never.apply(&linux).unwrap(), Keyboard::Mac);
+    }
+
+    /// Ruling 2, with the real look: a program of the library's engine, no lock held, no record.
+    #[test]
+    fn a_program_of_the_engine_keeps_its_files_as_they_are() {
+        use super::super::live::tests::Running;
+        let (_root, linux) = runtime(RELEASE);
+        let patch = || Patch { idle: super::super::live::idle, ..patch() };
+        let running = Running::at(&linux.join("graphics/bin/virgl_test_server"));
+        assert_eq!(patch().apply(&linux).unwrap(), Keyboard::Pending);
+        assert_eq!(one_set(&linux), "voile");
+        running.end();
+        assert_eq!(patch().apply(&linux).unwrap(), Keyboard::Mac);
+    }
 }

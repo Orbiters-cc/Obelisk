@@ -209,8 +209,8 @@ pub struct Play {
     throttle: Throttle,
     starting: bool,
     running: bool,
-    /// This launch's own Game session, from the first time it is seen (admitted, before it runs): only its own record
-    /// says how it ended.
+    /// This launch's own Game session, from the first time its supervisor is seen (before it runs): only its own
+    /// record says how it ended.
     session: Option<String>,
     /// When this launch was asked for (seconds since 1970): a session that began before it is never this launch's.
     admitted_at: u64,
@@ -267,8 +267,12 @@ impl Play {
             steps.push(PlayStep::Tell(event));
         }
         if let Some(active) = sessions.active.as_ref().filter(|active| self.ours(active)) {
-            // This launch's session from the first sight of it, whatever phase it is in.
-            if self.session.is_none() && active.started_at.is_none_or(|at| at + 2 >= self.admitted_at) {
+            // This launch's session once its supervisor took it, whatever phase it is in: until then it has a name of
+            // this process's own.
+            if active.observed
+                && self.session.is_none()
+                && active.started_at.is_none_or(|at| at + 2 >= self.admitted_at)
+            {
                 self.session = Some(active.id.clone());
             }
             if let Some(install) = active.runtime_install {
@@ -303,7 +307,10 @@ impl Play {
             }
             if active.observed && !self.starting {
                 self.starting = true;
-                steps.push(PlayStep::Tell(Event::Starting { app_id }));
+                steps.push(PlayStep::Tell(Event::Starting {
+                    app_id,
+                    session_id: self.session.clone(),
+                }));
             }
             if active.phase == GamePhase::Running && !self.running {
                 self.running = true;
@@ -397,7 +404,10 @@ impl Play {
             self.running || played.is_some() || last.is_some_and(|last| last.started_at.is_some());
         if ran {
             if !self.starting {
-                steps.push(PlayStep::Tell(Event::Starting { app_id }));
+                steps.push(PlayStep::Tell(Event::Starting {
+                    app_id,
+                    session_id: last.map(|last| last.id.clone()),
+                }));
             }
             if !self.running {
                 steps.push(PlayStep::Tell(Event::Running {

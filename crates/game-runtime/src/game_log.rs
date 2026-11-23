@@ -4,33 +4,46 @@
 //! becomes of this side, the game never blocks on its log and never ends by
 //! it:
 //!
-//! - the guest writes into a pipe whose writing end never blocks: when it is
-//!   full, what does not fit is lost to the log, and the write returns;
-//! - the launcher keeps a reading end of that pipe open, unread, for as long
-//!   as the game runs: a supervisor that is gone is a full pipe, never a
-//!   broken one, which would end the game;
-//! - here one thread reads the pipe into a bounded queue, and another filters
-//!   it into the log: a disk that stands still, or is full, costs lines, which
-//!   are counted, and the count is written once it can be.
+//! - the guest writes into a pipe as before 0.1.9, one whose writes block;
+//! - here one thread always reads it into a bounded queue, and another filters
+//!   the queue into the log: a disk that stands still, or is full, costs
+//!   lines, which are counted, and the count is written once it can be. The
+//!   reading thread waits for nothing but the pipe;
+//! - beside the supervisor, a process of its own holds the pipe's reading end
+//!   too, unread, and drains it to nothing once that thread, or the whole
+//!   supervisor, is gone: the game meets neither a full pipe nor a broken one.
+//!   It holds the engine's pin with it, as long as the game writes;
+//! - a pipe, a thread or a log that cannot be had is no reason to refuse a
+//!   game: its output goes nowhere then, and the session's record says why.
 //!
 //! The filter keeps a repeated line 200 times, then counts it. The lines the
 //! frame counters and the incident capture read pass as they are. Every class
-//! of lines has its budget, and all of them together a cap ([`Limits`]).
-//! What the engine's own programs on the Mac write (`metal-HUD:`, the window
-//! server's) goes to the log beside this, never through it.
+//! of lines has its budget, and all of them together a cap ([`Limits`]): the cap of
+//! what the guest wrote. What the engine's own programs on the Mac write
+//! (`metal-HUD:`, the window server's) goes to the log beside this, never
+//! through it, and is not in that cap.
 use std::{
     collections::{HashMap, VecDeque},
     io::{self, Read, Write},
-    os::fd::{AsFd, AsRawFd, OwnedFd},
+    os::{fd::{AsFd, OwnedFd}, unix::process::CommandExt},
+    process::{Command, Stdio},
     sync::{Arc, Condvar, Mutex, mpsc},
     time::{Duration, Instant},
 };
 
-/// The launcher's variable that names its ends of the pipe, reading then
-/// writing.
-pub(crate) const ENDS: &str = "OBELISK_LOG_PIPE";
-/// The launcher's ends have numbers no smaller: it moves them where it wants.
-const LOWEST: i32 = 20;
+/// The launcher's variable that names its guest's end of the pipe, or
+/// [`NOWHERE`].
+pub(crate) const END: &str = "OBELISK_LOG_PIPE";
+/// The guest's output goes nowhere.
+pub(crate) const NOWHERE: &str = "none";
+/// That end has a number no smaller: the launcher moves it where it wants.
+pub(crate) const LOWEST: i32 = 20;
+
+/// Waits until its standard error ends (the reader is gone), then reads its
+/// standard input to nothing until its last writer is. Its standard output is
+/// what it holds meanwhile.
+const DRAIN_ALONE: &str =
+    "trap '' TERM INT HUP; exec 3<&2 2>/dev/null 4>&1 >/dev/null; read -r _ <&3; exec 3<&-; exec /bin/cat";
 
 /// The lines that always pass, within their own budgets, by what they hold.
 /// Frame counters read the first two.
@@ -300,8 +313,6 @@ pub(crate) struct Lost {
     pub dropped: u64,
     /// Bytes the log could not be written.
     pub unwritten: u64,
-    /// The times the pipe was found full: the game may have lost lines then.
-    pub full: u64,
 }
 
 #[derive(Default)]
@@ -324,40 +335,32 @@ struct Shared {
     changed: Condvar,
 }
 
-/// A pipe for a guest's output, before its game is spawned.
-pub(crate) struct Pipe {
-    read: OwnedFd,
-    write: OwnedFd,
+/// A pipe for a guest's output, before its game is spawned: the guest's end
+/// and what takes the other to its log. `held` is kept open for as long as
+/// anything holds the guest's end, whatever becomes of this process.
+pub(crate) fn open(held: Stdio) -> io::Result<(OwnedFd, Writer)> {
+    open_with(held, LIMITS)
 }
 
-impl Pipe {
-    pub(crate) fn new() -> io::Result<Self> {
-        let (read, write) = io::pipe()?;
-        let read = rustix::io::fcntl_dupfd_cloexec(&read, LOWEST)?;
-        let write = rustix::io::fcntl_dupfd_cloexec(&write, LOWEST)?;
-        let flags = rustix::fs::fcntl_getfl(&write)?;
-        rustix::fs::fcntl_setfl(&write, flags | rustix::fs::OFlags::NONBLOCK)?;
-        Ok(Self { read, write })
-    }
-
-    /// What names its ends to the launcher (`ENDS`).
-    pub(crate) fn ends(&self) -> String {
-        format!("{} {}", self.read.as_raw_fd(), self.write.as_raw_fd())
-    }
-
-    /// Runs `spawn`, whose child gets both ends, then reads the pipe until its
-    /// last writer is gone; this process keeps no writing end.
-    pub(crate) fn inherited<T>(self, spawn: impl FnOnce() -> T) -> io::Result<(T, Writer)> {
-        use rustix::io::{FdFlags, fcntl_setfd};
-        // Another child of this process spawned meanwhile may get them too:
-        // it can only keep the pipe from ending, which nothing waits on.
-        fcntl_setfd(&self.read, FdFlags::empty())?;
-        fcntl_setfd(&self.write, FdFlags::empty())?;
-        let spawned = spawn();
-        fcntl_setfd(&self.read, FdFlags::CLOEXEC)?;
-        drop(self.write);
-        Ok((spawned, Writer::start(self.read, LIMITS)?))
-    }
+fn open_with(held: Stdio, limits: Limits) -> io::Result<(OwnedFd, Writer)> {
+    let (read, write) = io::pipe()?;
+    let (alone, reading) = io::pipe()?;
+    let mut drain = Command::new("/bin/sh");
+    drain
+        .args(["-c", DRAIN_ALONE])
+        .env_clear()
+        .current_dir("/")
+        .process_group(0)
+        .stdin(read.try_clone()?)
+        .stdout(held)
+        .stderr(alone);
+    let mut drain = drain.spawn()?;
+    // Reaped whenever it ends; a thread that cannot be had costs nothing.
+    let _ = std::thread::Builder::new().name("game-log-drain".into()).spawn(move || {
+        let _ = drain.wait();
+    });
+    let writer = Writer::start(read.into(), reading.into(), limits)?;
+    Ok((write.into(), writer))
 }
 
 /// A game's output on its way to its log.
@@ -374,15 +377,19 @@ const LOOK: i32 = 100;
 const DRAIN: Duration = Duration::from_secs(2);
 
 impl Writer {
-    fn start(read: OwnedFd, limits: Limits) -> io::Result<Self> {
+    /// Reads `read`; `reading` is closed as that ends, however it does.
+    fn start(read: OwnedFd, reading: OwnedFd, limits: Limits) -> io::Result<Self> {
         let shared = Arc::new(Shared::default());
         let (destination, opened) = mpsc::channel();
         let (ended, done) = mpsc::channel();
         std::thread::Builder::new().name("game-log-read".into()).spawn({
             let shared = shared.clone();
-            move || take(read, &shared, limits.queue)
+            move || {
+                let _reading = reading;
+                take(read, &shared, limits.queue);
+            }
         })?;
-        std::thread::Builder::new().name("game-log-write".into()).spawn({
+        let writing = std::thread::Builder::new().name("game-log-write".into()).spawn({
             let shared = shared.clone();
             move || {
                 if let Ok(destination) = opened.recv() {
@@ -390,7 +397,11 @@ impl Writer {
                 }
                 let _ = ended.send(());
             }
-        })?;
+        });
+        if let Err(error) = writing {
+            shared.queue.lock().unwrap().closed = true;
+            return Err(error);
+        }
         Ok(Self { shared, destination: Some(destination), done })
     }
 
@@ -449,10 +460,6 @@ fn take(read: OwnedFd, shared: &Shared, capacity: usize) {
             Err(_) => break,
         };
         let mut queue = shared.queue.lock().unwrap();
-        // (a pipe holds 16 KiB until it is full once, then 64)
-        if matches!(read, 16_384 | 65_536) {
-            queue.lost.full += 1;
-        }
         if queue.bytes + read <= capacity {
             queue.bytes += read;
             match queue.chunks.back_mut() {
@@ -523,11 +530,8 @@ fn write(mut log: Box<dyn Write + Send>, shared: &Shared, limits: Limits) {
     filter.end(Instant::now(), &mut out);
     let lost = shared.queue.lock().unwrap().lost;
     if lost != Lost::default() {
-        let Lost { dropped, unwritten, full } = lost;
-        filter.notice(
-            format!("output lost in all: {dropped} bytes dropped, {unwritten} bytes not written; the pipe was full {full} times"),
-            &mut out,
-        );
+        let Lost { dropped, unwritten } = lost;
+        filter.notice(format!("output lost in all: {dropped} bytes dropped, {unwritten} bytes not written"), &mut out);
     }
     put(&mut filter, out, shared);
 }

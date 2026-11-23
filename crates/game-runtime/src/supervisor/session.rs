@@ -555,7 +555,7 @@ pub(crate) fn serve<L: Launch>(
     // the game: no update, repair or removal can change the window server, the render servers or the engine a
     // running game started from. It holds the lock its preparation took, inherited with this process; a launch
     // without it is not accepted.
-    let _engine_pin = launch
+    let engine_pin = launch
         .wine()
         .filter(|wine| wine.settings.engine == crate::wine::Engine::Linux)
         .map(|wine| L::pin(&wine.runtime))
@@ -598,6 +598,7 @@ pub(crate) fn serve<L: Launch>(
         starting: None,
         socket: socket.clone(),
         quit_accepted: None,
+        log_failure: None,
     };
     journal::write(&opening.root, &record)?;
     let questions = Arc::new(Questions::supervised());
@@ -668,7 +669,7 @@ pub(crate) fn serve<L: Launch>(
         // Kept even if preparation fails, so an abandoned launch still
         // releases its Cloud work.
         let mut cloud = None;
-        let outcome = run(&mut launch, &mut cloud, &session, inspect, &alive).await;
+        let outcome = run(&mut launch, &mut cloud, &session, inspect, &alive, engine_pin.as_ref()).await;
         if let Some(terminated) = terminated {
             terminated.abort();
         }
@@ -727,6 +728,7 @@ async fn run<L: Launch>(
     session: &Arc<Session<L::P>>,
     inspect: Inspect,
     alive: &SessionAlive<'_>,
+    pin: Option<&crate::voile::engine_patch::Pin>,
 ) -> Result<(), Failure<L>> {
     use exec::Execution;
 
@@ -762,11 +764,20 @@ async fn run<L: Launch>(
         .await?;
     let wine = launch.wine();
     // What a guest on the Linux engine writes goes to its log through a pipe
-    // that never holds it up. Without one, it writes to the log itself.
-    let pipe = wine
+    // that is always read. Nothing of the log refuses a game: what cannot be
+    // had is said in the record, and the output goes nowhere.
+    let mut log_failure = None;
+    let guest = wine
         .as_ref()
         .filter(|wine| wine.settings.engine == crate::wine::Engine::Linux && target.log.is_some())
-        .and_then(|_| crate::game_log::Pipe::new().ok());
+        .map(|_| {
+            let held = pin.map_or_else(|| Ok(Stdio::null()), |pin| pin.stdio());
+            held.and_then(crate::game_log::open)
+                .inspect_err(|error| log_failure = Some(format!("the game's output cannot be read: {error}")))
+                .ok()
+        });
+    let on_the_engine = guest.is_some();
+    let (guest_end, mut guest_output) = guest.flatten().unzip();
     // A game in Wine for macOS reads the Mac's gamepads through the input
     // service while it runs.
     let input = wine
@@ -797,13 +808,15 @@ async fn run<L: Launch>(
         .get()
         .and_then(Option::as_ref)
         .map(crate::wine::Config::log_header);
-    let helper = exec::Helper::new(
+    let mut helper = exec::Helper::new(
         &prepared.helper,
         &prepared.environment,
         exec::Admission::of(&target, log_header),
-    )?
-    .logged(pipe);
-    let (mut game, mut guest_output, admitted) = {
+    )?;
+    if on_the_engine {
+        helper = helper.guest_output(guest_end);
+    }
+    let (mut game, admitted) = {
         // Cancellation and spawn have one linearization point. Cancellation
         // after it never ends a game, including sign-out and UI loss.
         let _admission = session.admission.lock().unwrap();
@@ -811,7 +824,7 @@ async fn run<L: Launch>(
         if let Some(cloud) = cloud.as_mut() {
             cloud.started()?;
         }
-        let (mut game, guest_output) = helper.spawn()?;
+        let mut game = helper.spawn()?;
         {
             let mut state = session.state.lock().unwrap();
             state.spawned = true;
@@ -820,7 +833,7 @@ async fn run<L: Launch>(
         let admitted = game.admit(inspect, |starting| {
             session.update(|r| r.starting = Some(starting))
         });
-        (game, guest_output, admitted)
+        (game, admitted)
     };
     // A helper that never became the game keeps its ownership until it is
     // reaped, outside the admission lock.
@@ -858,6 +871,16 @@ async fn run<L: Launch>(
             r.game = identity.or(starting);
             r.phase = Phase::Running;
         });
+        // The log the helper opened for the game, if it could.
+        let opened = target.log.as_ref().map(|log| std::fs::OpenOptions::new().append(true).open(log));
+        match (opened, &mut guest_output) {
+            (Some(Ok(log)), Some(writer)) => writer.write_to(log),
+            (Some(Err(error)), _) => log_failure = Some(format!("the log cannot be opened: {error}")),
+            _ => {}
+        }
+        if log_failure.is_some() {
+            let _ = session.update(|r| r.log_failure = log_failure);
+        }
     }
     let watching = launch.watch(&host, session);
     let shown_stop = Arc::new(AtomicBool::new(false));
@@ -865,13 +888,6 @@ async fn run<L: Launch>(
         .then(|| target.log.clone())
         .flatten()
         .and_then(|log| follow_shown(session.clone(), log, shown_stop.clone()));
-    if started
-        && let Some(writer) = &mut guest_output
-        && let Some(log) = &target.log
-        && let Ok(log) = std::fs::OpenOptions::new().append(true).open(log)
-    {
-        writer.write_to(log);
-    }
     let began = Instant::now();
     let status = game.exit().await;
     let ended = crate::boot_clock::now();

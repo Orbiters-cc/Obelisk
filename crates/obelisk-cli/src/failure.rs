@@ -13,6 +13,7 @@ pub const CODES: &[&str] = &[
     HELPERS_MISSING,
     KEYCHAIN_UNAVAILABLE,
     NOT_SIGNED_IN,
+    OTHER_ACCOUNT,
     SIGN_IN_EXPIRED,
     INPUT_MISSING,
     CREDENTIALS_REJECTED,
@@ -54,6 +55,7 @@ pub const LIBRARY_UNAVAILABLE: &str = "library_unavailable";
 pub const HELPERS_MISSING: &str = "helpers_missing";
 pub const KEYCHAIN_UNAVAILABLE: &str = "keychain_unavailable";
 pub const NOT_SIGNED_IN: &str = "not_signed_in";
+pub const OTHER_ACCOUNT: &str = "other_account";
 pub const SIGN_IN_EXPIRED: &str = "sign_in_expired";
 pub const INPUT_MISSING: &str = "input_missing";
 pub const CREDENTIALS_REJECTED: &str = "credentials_rejected";
@@ -96,8 +98,7 @@ pub struct Failure {
     /// Obelisk's own reason, a localization key of its app such as
     /// `backend.steam.runtime.startFailed`, when the engine gave one.
     pub key: Option<String>,
-    /// The engine files no game starts on: under `engine_files`, and for a
-    /// runtime that lost one of its other files.
+    /// The engine files no game starts on, under `engine_files`.
     pub engine: Option<EngineFiles>,
 }
 
@@ -125,6 +126,13 @@ impl EngineFiles {
             ("backend.runtime.wineIncomplete", _) => Some(Self {
                 paths: Vec::new(),
                 reason: "The runtime lacks a file a game cannot start without.".to_owned(),
+                action: Action::Repair.name().to_owned(),
+            }),
+            // The runtime itself, or its Wine: a launch gets a runtime before
+            // it is prepared, so what is missing here is a file of one.
+            ("backend.runtime.wineUnavailable", _) => Some(Self {
+                paths: Vec::new(),
+                reason: "The runtime that runs Windows games is not there, or lacks its Wine.".to_owned(),
                 action: Action::Repair.name().to_owned(),
             }),
             _ => None,
@@ -210,10 +218,12 @@ fn known(key: &str) -> Option<&'static str> {
         | "backend.voile.cancelled"
         | "cancelled" => CANCELLED,
         "backend.runtime.rosettaUnavailable" => ROSETTA_REQUIRED,
-        Incoherent::KEY => ENGINE_FILES,
+        // Whatever noticed it first.
+        Incoherent::KEY | "backend.runtime.wineIncomplete" | "backend.runtime.wineUnavailable" => ENGINE_FILES,
         "backend.voile.inUse" => BUSY,
         "backend.voile.downloadFailed"
         | "backend.voile.damaged"
+        | "backend.voile.noExchange"
         | "backend.voile.storageFailed" => VOILE_FAILED,
         "backend.steam.components.downloadFailed"
         | "backend.steam.components.damaged"
@@ -306,8 +316,17 @@ mod tests {
         assert_eq!(engine.paths, ["engine/wsd", "a path, with a comma"]);
         assert_eq!(engine.reason, "the engine files are not all of one release");
         assert_eq!(engine.action, "repair");
-        let gone = Failure::engine(LAUNCH_FAILED, "backend.runtime.wineIncomplete");
-        assert_eq!((gone.code, gone.engine.unwrap().action.as_str()), (LAUNCH_FAILED, "repair"));
+        // Whichever probe noticed that a file is gone.
+        for key in ["backend.runtime.wineIncomplete", "backend.runtime.wineUnavailable"] {
+            let gone = Failure::engine(LAUNCH_FAILED, key);
+            assert_eq!((gone.code, gone.engine.unwrap().action.as_str()), (ENGINE_FILES, "repair"), "{key}");
+        }
+        let disk = Failure::engine(
+            LAUNCH_FAILED,
+            game_runtime::voile::Failure::Exchange("/Volumes/a disk/Voile".into()).to_string(),
+        );
+        assert_eq!((disk.code, disk.engine), (VOILE_FAILED, None));
+        assert!(disk.message.contains("/Volumes/a disk/Voile"), "{}", disk.message);
         assert_eq!(Failure::engine(LAUNCH_FAILED, "backend.voile.inUse").code, BUSY);
         assert_eq!(Failure::engine(LAUNCH_FAILED, "backend.steam.runtime.startFailed").engine, None);
     }

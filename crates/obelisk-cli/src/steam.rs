@@ -8,7 +8,7 @@ use crate::{
     failure::{
         ALREADY_RUNNING, ANOTHER_GAME_RUNNING, BUSY, Failure, GAME_RUNNING, GUARD_REJECTED,
         GUARD_UNSUPPORTED, INPUT_MISSING, INTERNAL, LOGIN_FAILED, NO_WINDOWS_BUILD, NOT_INSTALLED,
-        NOT_OWNED, NOT_RUNNING, OTHER_SESSION, QUIT_FAILED, SESSION_RECOVERY_FAILED, SIGN_IN_EXPIRED,
+        NOT_OWNED, NOT_RUNNING, OTHER_ACCOUNT, OTHER_SESSION, QUIT_FAILED, SESSION_RECOVERY_FAILED, SIGN_IN_EXPIRED,
         STEAM_FAILED, STILL_RUNNING,
     },
     follow::{self, Install, InstallStep, Play, PlayStep},
@@ -451,9 +451,22 @@ impl Steam<'_> {
     /// `steam play`: launches the installed Windows build as the app's Play
     /// does, with `arguments` after the game's own, and follows its Game
     /// session until it is finished. The supervisor owns the game: it runs on
-    /// when this process ends.
-    pub async fn play(&self, app_id: u32, arguments: Vec<String>, render_percent: Option<u32>) -> Result<(), Failure> {
+    /// when this process ends. `steam_id` names the only account it may start
+    /// for: the saved session read here, once, is the one it starts with.
+    pub async fn play(
+        &self,
+        app_id: u32,
+        steam_id: Option<u64>,
+        arguments: Vec<String>,
+        render_percent: Option<u32>,
+    ) -> Result<(), Failure> {
         let saved = credentials::signed_in(self.store)?;
+        if steam_id.is_some_and(|expected| expected != saved.steam_id) {
+            return Err(Failure::new(
+                OTHER_ACCOUNT,
+                "Another Steam account is signed in than the one the game was to start for: nothing was started.",
+            ));
+        }
         self.places.require_helpers()?;
         self.places.open_library()?;
         let (sessions, recovered) = self.sessions().await?;

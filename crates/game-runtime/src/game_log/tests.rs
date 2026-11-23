@@ -120,23 +120,14 @@ fn lines_are_put_back_together_across_reads_and_a_gap_glues_none() {
 
 /// The program that writes as a game does, given its body, into a pipe.
 fn producer(body: &str) -> (Child, Writer) {
-    let pipe = Pipe::new().unwrap();
-    let ends = pipe.ends();
+    let (end, writer) = open(Stdio::null()).unwrap();
     let mut command = Command::new("/bin/bash");
-    // As the launcher does: the reading end kept, the writing one the guest's.
-    let script = format!(
-        r#"read -r r w <<<"{ends}"
-exec 7<&"$r" 2>&"$w"
-eval "exec $r<&- $w>&-"
-{body}"#
-    );
     command
-        .arg("-c")
-        .arg(script)
+        .args(["-c", body])
         .stdin(Stdio::null())
-        .stdout(Stdio::null());
-    let (child, writer) = pipe.inherited(|| command.spawn()).unwrap();
-    (child.unwrap(), writer)
+        .stdout(Stdio::null())
+        .stderr(end);
+    (command.spawn().unwrap(), writer)
 }
 
 const MANY: &str = "i=0; while [ $i -lt 20000 ]; do echo \"line $i of a game's\" >&2; i=$((i+1)); done; exit 7";
@@ -169,44 +160,58 @@ fn a_game_s_output_reaches_its_log() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "first\nsecond\n");
 }
 
-/// Finding 6: a supervisor that is gone (its reading end with it) ends no
-/// game: no EPIPE, no SIGPIPE.
+/// Finding 6: a reader that is gone ends no game (no EPIPE, no SIGPIPE), and
+/// holds none up either: what it left is drained.
 #[test]
 fn a_dead_reader_neither_stops_nor_ends_its_game() {
-    // As `Pipe::inherited` leaves it, the reader then gone.
-    let pipe = Pipe::new().unwrap();
-    let (read, write) = pipe.ends().split_once(' ').map(|(r, w)| (r.to_owned(), w.to_owned())).unwrap();
-    let mut command = Command::new("/bin/bash");
-    command
-        .arg("-c")
-        .arg(format!("exec 7<&{read} 2>&{write}; eval 'exec {read}<&- {write}>&-'; sleep 0.3; {MANY}"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null());
-    let (child, writer) = pipe.inherited(|| command.spawn()).unwrap();
-    let mut child = child.unwrap();
+    let (mut child, writer) = producer(&format!("sleep 0.3; {MANY}"));
     // The reading thread ends and closes its end.
+    drop(writer);
+    ends(&mut child);
+    // In the middle of it, with the pipe already full of what nobody read.
+    let (mut child, writer) = producer(&MANY.replace("exit 7", "sleep 0.3; echo last >&2; exit 7"));
+    std::thread::sleep(Duration::from_millis(50));
     drop(writer);
     ends(&mut child);
 }
 
-/// Finding 6: a supervisor that stands still holds no game up. Its thread is
-/// stopped here by what it waits on: nothing reads the pipe at all.
+/// Sixth verification, the logging finding (ruling 7): the game's standard
+/// error is a blocking pipe, as in 0.1.8: a strict producer that takes
+/// WouldBlock for an error never meets one, however slow the log is, and no
+/// other child of this process ever gets an end of it.
 #[test]
-fn a_stopped_reader_neither_stops_nor_ends_its_game() {
-    let pipe = Pipe::new().unwrap();
-    let (read, write) = pipe.ends().split_once(' ').map(|(r, w)| (r.to_owned(), w.to_owned())).unwrap();
-    let mut command = Command::new("/bin/bash");
-    command
-        .arg("-c")
-        .arg(format!("exec 7<&{read} 2>&{write}; eval 'exec {read}<&- {write}>&-'; {MANY}"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null());
-    rustix::io::fcntl_setfd(&pipe.read, rustix::io::FdFlags::empty()).unwrap();
-    rustix::io::fcntl_setfd(&pipe.write, rustix::io::FdFlags::empty()).unwrap();
-    let mut child = command.spawn().unwrap();
-    // Both ends stay open here and nobody reads.
-    ends(&mut child);
-    drop(pipe);
+fn a_strict_producer_never_meets_would_block() {
+    let released = Arc::new(AtomicBool::new(false));
+    let (sender, _written) = std::sync::mpsc::channel();
+    let (end, mut writer) = open(Stdio::null()).unwrap();
+    writer.write_to(Stuck(released.clone(), sender));
+    assert!(!rustix::fs::fcntl_getfl(&end).unwrap().contains(rustix::fs::OFlags::NONBLOCK));
+    assert!(rustix::io::fcntl_getfd(&end).unwrap().contains(rustix::io::FdFlags::CLOEXEC));
+    let mut game = std::fs::File::from(end);
+    let line = [b'x'; 8 << 10];
+    for _ in 0..4096 {
+        game.write_all(&line).unwrap();
+    }
+    assert!(writer.shared.queue.lock().unwrap().bytes <= LIMITS.queue, "bounded");
+    released.store(true, Ordering::Release);
+}
+
+/// What is held lasts as long as anything holds the guest's end, whatever
+/// becomes of the reader: a game's own lifetime.
+#[test]
+fn what_is_held_lasts_until_the_last_writer_is_gone() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("lock");
+    let file = std::fs::File::create(&path).unwrap();
+    file.lock_shared().unwrap();
+    let (end, writer) = open(file.into()).unwrap();
+    let taken = || std::fs::File::open(&path).unwrap().try_lock().is_err();
+    assert!(taken());
+    drop(writer);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(taken(), "the game writes still");
+    drop(end);
+    crate::tests::wait_for_lock_release(&path);
 }
 
 /// A log that stands still until it is released.
@@ -230,14 +235,8 @@ impl Write for Stuck {
 fn a_log_that_stands_still_costs_counted_lines_only() {
     let released = Arc::new(AtomicBool::new(false));
     let (sender, written) = std::sync::mpsc::channel();
-    let pipe = Pipe::new().unwrap();
-    let write = pipe.write.try_clone().unwrap();
-    let mut writer = Writer::start(pipe.read, Limits { queue: 32 << 10, ..LIMITS }).unwrap();
-    drop(pipe.write);
+    let (write, mut writer) = open_with(Stdio::null(), Limits { queue: 32 << 10, ..LIMITS }).unwrap();
     writer.write_to(Stuck(released.clone(), sender));
-    // Blocking here: the reader itself always keeps up.
-    let flags = rustix::fs::fcntl_getfl(&write).unwrap();
-    rustix::fs::fcntl_setfl(&write, flags - rustix::fs::OFlags::NONBLOCK).unwrap();
     let mut game = std::fs::File::from(write);
     let began = Instant::now();
     for n in 0..40_000 {

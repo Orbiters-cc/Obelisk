@@ -119,6 +119,7 @@ impl<P: Sample> Fixture<P> {
             starting: None,
             socket: root.path().join("unused-socket"),
             quit_accepted: None,
+            log_failure: None,
         };
         journal::write(&sessions, &record).unwrap();
         let helper = root.path().join("process-table.json");

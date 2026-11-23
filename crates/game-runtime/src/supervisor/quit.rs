@@ -179,11 +179,14 @@ pub(crate) fn kill(pids: &[u32]) {
         .status();
 }
 
-/// What `command` prints, unless it fails or outlasts `LISTING_TIMEOUT`.
+/// What `command` prints, unless it fails or outlasts `LISTING_TIMEOUT`. Its
+/// dates are in UTC, and its names are UTF-8: in the C locale lsof writes
+/// every other character escaped, and a path holding one matches nothing.
 pub(crate) fn listing(mut command: Command) -> Option<String> {
     let mut child = command
         .env_clear()
-        .env("LC_ALL", "C")
+        .env("LC_CTYPE", "en_US.UTF-8")
+        .env("TZ", "UTC")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

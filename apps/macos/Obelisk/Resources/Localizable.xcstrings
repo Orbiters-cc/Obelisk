@@ -34160,6 +34160,59 @@
         }
       }
     },
+    "backend.voile.noExchange": {
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das Laufwerk von %@ kann nicht zwei Ordner in einem Schritt austauschen, wie es ein APFS-Laufwerk tut: Was dort installiert ist, kann nicht an Ort und Stelle repariert werden."
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The disk of %@ cannot exchange two folders in one step, as an APFS disk does: what is installed there cannot be repaired in place."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "El disco de %@ no puede intercambiar dos carpetas en un solo paso, como hace un disco APFS: lo que está instalado ahí no se puede reparar en su sitio."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Le disque de %@ ne peut pas échanger deux dossiers en une seule étape, comme le fait un disque APFS : ce qui y est installé ne peut pas être réparé sur place."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Il disco di %@ non può scambiare due cartelle in un solo passaggio, come fa un disco APFS: ciò che vi è installato non può essere riparato sul posto."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@のディスクは、APFSディスクのように2つのフォルダを一度に入れ替えることができません。そこにインストールされているものは、その場では修復できません。"
+          }
+        },
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "O disco de %@ não consegue trocar duas pastas em uma única etapa, como faz um disco APFS: o que está instalado ali não pode ser reparado no lugar."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ 所在的磁盘无法像 APFS 磁盘那样一步交换两个文件夹：安装在那里的内容无法就地修复。"
+          }
+        }
+      }
+    },
     "backend.voile.cancelled": {
       "extractionState": "manual",
       "localizations": {

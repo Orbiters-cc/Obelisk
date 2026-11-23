@@ -159,6 +159,9 @@ pub enum Event {
     },
     Starting {
         app_id: u32,
+        /// The Game session this very launch was admitted as, before its game
+        /// runs: the one `steam quit --session` names.
+        session_id: Option<String>,
     },
     Running {
         app_id: u32,
@@ -403,7 +406,7 @@ mod tests {
             Event::Version { version: "0" }.line(),
             Event::Done { count: 0 }.line(),
             Event::Preparing { app_id: 1 }.line(),
-            Event::Starting { app_id: 1 }.line(),
+            Event::Starting { app_id: 1, session_id: None }.line(),
             Event::Settings { prereleases: true }.line(),
             Event::EngineRepairing {
                 bytes_done: 1,

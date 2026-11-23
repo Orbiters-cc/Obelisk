@@ -42,6 +42,7 @@ fn admission(directory: &Path) -> Admission {
         working_directory: directory.into(),
         log: Some(directory.join("game.log")),
         log_header: Some("obelisk: engine=wine-macos\n".into()),
+        guest_output: false,
     }
 }
 
@@ -59,7 +60,7 @@ fn inspect(pid: u32) -> Result<Option<Identity>, Error> {
 async fn a_helper_is_admitted_as_game_exec_once_its_starting_identity_is_recorded() {
     let directory = tempfile::tempdir().unwrap();
     let directory = directory.path().canonicalize().unwrap();
-    let mut game = helper(&directory).spawn().unwrap().0;
+    let mut game = helper(&directory).spawn().unwrap();
     let spawned = game.pid().unwrap();
     let mut starting = None;
 
@@ -91,7 +92,7 @@ async fn a_helper_is_admitted_as_game_exec_once_its_starting_identity_is_recorde
 async fn a_helper_whose_identity_is_not_recorded_never_becomes_the_game() {
     let directory = tempfile::tempdir().unwrap();
     let directory = directory.path().canonicalize().unwrap();
-    let mut game = helper(&directory).spawn().unwrap().0;
+    let mut game = helper(&directory).spawn().unwrap();
 
     let admitted = game.admit(inspect, |_| Err(Error::Storage));
 

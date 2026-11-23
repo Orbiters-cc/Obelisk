@@ -31,12 +31,15 @@ use std::{
 
 pub mod engine_patch;
 mod feed;
+pub(crate) mod live;
 
 use feed::Offered;
 pub(crate) use feed::refresh;
 pub use feed::{take_prereleases, takes_prereleases};
 
 const RELEASE: &str = include_str!("../voile-release.json");
+/// The runtimes' folder, in the library.
+pub(crate) const ROOT: &str = "Voile";
 /// Where install-dev.sh puts a locally built runtime.
 const DEVELOPMENT: &str = "current";
 /// What every release archive describes itself with.
@@ -98,6 +101,14 @@ pub enum Failure {
     /// A game runs on the runtime that would be replaced.
     #[error("backend.voile.inUse")]
     InUse,
+    /// The disk cannot exchange two folders in one step, as APFS does: what
+    /// is at this path is never replaced there.
+    #[error("{}", exchange_message(.0))]
+    Exchange(PathBuf),
+}
+
+fn exchange_message(path: &Path) -> String {
+    serde_json::json!({ "key": "backend.voile.noExchange", "args": [path.to_string_lossy()] }).to_string()
 }
 impl From<std::io::Error> for Failure {
     fn from(_: std::io::Error) -> Self {
@@ -131,14 +142,29 @@ fn holds(runtime: &Path, release: &str) -> bool {
 }
 
 /// The Linux engine's runtime in `root`: the development runtime's, else the
-/// one inside the release Windows games run in.
+/// one inside the release Windows games run in, as that release has it: what
+/// it lost is for whoever starts a game there to tell ([`missing`]).
 pub fn linux_runtime(root: &Path) -> Option<PathBuf> {
     let development = root.join(DEVELOPMENT).join(LINUX);
     if has_engine(&development) {
         return Some(development);
     }
-    let linux = newest(root, &Offer::read(root))?.1.join(LINUX);
-    has_engine(&linux).then_some(linux)
+    let release = newest(root, &Offer::read(root))?.1;
+    let linux = release.join(LINUX);
+    // A release whose files are ours to patch carries an engine, whatever is
+    // left of it; another carries one when its folder is there.
+    let carries = version(&release).as_deref() == Some(engine_patch::release());
+    (carries || linux.is_dir()).then_some(linux)
+}
+
+/// The files a Linux engine's runtime cannot start without that `runtime`
+/// lacks, by their path in it.
+pub(crate) fn missing(runtime: &Path) -> Vec<String> {
+    ENGINE
+        .iter()
+        .filter(|file| !runtime.join(file).exists())
+        .map(|file| (*file).to_owned())
+        .collect()
 }
 
 /// Whether the runtime Windows games run in is the one install-dev.sh put
@@ -161,8 +187,10 @@ pub fn keyboard(root: &Path) -> Option<engine_patch::Keyboard> {
 }
 
 /// The engine and the Wine it runs.
+const ENGINE: [&str; 2] = ["engine/fexdarwin-run", "wine/bin/wine"];
+
 fn has_engine(runtime: &Path) -> bool {
-    runtime.join("engine/fexdarwin-run").is_file() && runtime.join("wine/bin/wine").exists()
+    runtime.join(ENGINE[0]).is_file() && runtime.join(ENGINE[1]).exists()
 }
 
 /// The Voile release Windows games run in now, as its runtime.json names it.
@@ -461,35 +489,60 @@ impl Install {
             return Ok(destination);
         }
         // One process at a time installs into a library.
-        let _alone = self.cancellable(Self::alone(root)).await??;
+        let alone = self.cancellable(Self::alone(root)).await??;
         if holds(&destination, &release.version) && !again {
             return Ok(destination);
         }
         // Found before the download, checked again as it goes in place.
-        if destination.exists() {
-            let runtime = destination.clone();
-            blocking(move || engine_patch::Replacing::hold(&runtime))
-                .await?
-                .ok_or(Failure::InUse)?;
+        let replaces = fs::symlink_metadata(&destination).is_ok();
+        if replaces {
+            let (runtime, folder) = (destination.clone(), root.to_owned());
+            blocking(move || {
+                engine_patch::Replacing::hold(&runtime)?.ok_or(Failure::InUse)?;
+                exchanges(&folder)
+            })
+            .await?;
         }
-        let extracted = self.extract(root, release, archive).await?;
-        let runtime = extracted.path().join(format!("voile-{}", release.version));
-        if !holds(&runtime, &release.version) {
-            return Err(Failure::Damaged);
-        }
+        step("before-extract");
+        let (extracted, members) = self.extract(root, release, archive).await?;
+        step("after-extract");
+        let (root, release) = (root.to_owned(), release.version.clone());
         blocking(move || {
-            // The engine's files as the release ships them, or nothing is
-            // replaced: security software may have taken one meanwhile.
-            if has_engine(&runtime.join(LINUX)) && !engine_patch::pristine(&runtime.join(LINUX)) {
-                return Ok(Err(Failure::Damaged));
+            // Held to the end, whoever waits for this.
+            let _alone = alone;
+            let runtime = extracted.path().join(format!("voile-{release}"));
+            // The complete release, as its archive holds it, or nothing is
+            // replaced: security software may have taken a file meanwhile.
+            whole(&runtime, &release, &members)?;
+            step("after-validation");
+            if replaces {
+                let _held = engine_patch::Replacing::hold(&destination)?.ok_or(Failure::InUse)?;
+                step("after-lock");
+                exchange(&runtime, &destination)?;
+                // Now the one it replaced: it goes only once the new one is
+                // whole in its place too, else it takes its place back.
+                let replaced = extracted.keep();
+                step("after-exchange");
+                if let Err(failure) = whole(&destination, &release, &members) {
+                    exchange(&runtime, &destination)?;
+                    let _ = fs::remove_dir_all(replaced);
+                    return Err(failure);
+                }
+                step("after-verification");
+                let _ = fs::remove_dir_all(replaced);
+            } else {
+                use rustix::fs::{CWD, RenameFlags, renameat_with};
+                let _held = engine_patch::Replacing::free(&destination)?.ok_or(Failure::InUse)?;
+                renameat_with(CWD, &runtime, CWD, &destination, RenameFlags::NOREPLACE)
+                    .map_err(std::io::Error::from)?;
+                whole(&destination, &release, &members)?;
             }
-            match engine_patch::Replacing::hold(&destination)? {
-                Some(_held) => put_in_place(&runtime, &destination)?,
-                None => return Ok(Err(Failure::InUse)),
-            }
-            Ok(Ok(destination))
+            // Nothing an unfinished install left is needed any more.
+            remove_entries(&root, |name| name.starts_with(UNFINISHED));
+            step("after-cleanup");
+            Ok(destination)
         })
-        .await?
+        .await
     }
 
     /// Waits until no other process installs into `root`.
@@ -504,22 +557,21 @@ impl Install {
     }
 
     /// Checks `archive` (or downloads it) and extracts it into a folder of
-    /// `root` that goes away unless the caller moves what it holds.
+    /// `root` that goes away unless the caller moves what it holds; returns
+    /// it with the name of everything the archive holds. What an unfinished
+    /// install left stays: it may hold the only runtime there is.
     async fn extract(
         &self,
         root: &Path,
         expected: &Release,
         archive: Option<&Path>,
-    ) -> Result<tempfile::TempDir, Failure> {
+    ) -> Result<(tempfile::TempDir, Vec<PathBuf>), Failure> {
         self.total.store(expected.size, Ordering::Release);
-        let unfinished = root.to_owned();
-        tokio::task::spawn_blocking(move || {
-            fs::create_dir_all(&unfinished)?;
-            remove_entries(&unfinished, |name| name.starts_with(UNFINISHED));
-            Ok::<_, Failure>(())
-        })
-        .await
-        .map_err(|_| Failure::Storage)??;
+        fs::create_dir_all(root)?;
+        // An unfinished download is no runtime.
+        remove_entries(root, |name| {
+            name.starts_with(UNFINISHED) && root.join(name).is_file()
+        });
         let downloaded;
         let archive = match archive {
             Some(archive) => {
@@ -543,20 +595,35 @@ impl Install {
         let extracted = tempfile::Builder::new()
             .prefix(UNFINISHED)
             .tempdir_in(root)?;
+        // It names each member it lays, on its standard error.
         let mut tar = tokio::process::Command::new("/usr/bin/tar")
-            .arg("-xJf")
+            .arg("-xvJf")
             .arg(archive)
             .arg("-C")
             .arg(extracted.path())
+            .env("LC_ALL", "C")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()?;
-        if !self.cancellable(tar.wait()).await??.success() {
+        let mut told = tar.stderr.take().ok_or(Failure::Storage)?;
+        let mut names = Vec::new();
+        let laid = async {
+            tokio::io::AsyncReadExt::read_to_end(&mut told, &mut names).await?;
+            tar.wait().await
+        };
+        if !self.cancellable(laid).await??.success() {
             return Err(Failure::Damaged);
         }
-        Ok(extracted)
+        step("after-untar");
+        // Not one name that cannot be read: what cannot be told is not whole.
+        let members: Option<Vec<PathBuf>> = names
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| line.strip_prefix(b"x "))
+            .map(|name| member(name, &format!("voile-{}", expected.version)))
+            .collect();
+        Ok((extracted, members.filter(|members| !members.is_empty()).ok_or(Failure::Damaged)?))
     }
 
     async fn download(
@@ -605,14 +672,17 @@ impl Install {
     }
 }
 
+/// Where a test may stop an install.
+#[cfg(not(test))]
+fn step(_name: &str) {}
+#[cfg(test)]
+use tests::step;
+
 /// Runs `work`, which waits on locks or files, off the async runtime.
 async fn blocking<T: Send + 'static>(
-    work: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+    work: impl FnOnce() -> Result<T, Failure> + Send + 'static,
 ) -> Result<T, Failure> {
-    tokio::task::spawn_blocking(work)
-        .await
-        .map_err(|_| Failure::Storage)?
-        .map_err(Failure::from)
+    tokio::task::spawn_blocking(work).await.map_err(|_| Failure::Storage)?
 }
 
 /// The release a repair of `root` installs again: the one Windows games run in
@@ -636,24 +706,82 @@ fn to_repair(root: &Path, offer: &Offer) -> Option<String> {
         .map(|(_, name)| name)
 }
 
-/// Puts the extracted `runtime` at `destination`, in one step where there is
-/// something to replace, which then goes with the extraction's folder: there
-/// is no moment without a whole runtime at `destination`.
-fn put_in_place(runtime: &Path, destination: &Path) -> std::io::Result<()> {
-    use rustix::fs::{CWD, RenameFlags, renameat_with};
-    if fs::symlink_metadata(destination).is_err() {
-        return fs::rename(runtime, destination);
+/// A member of a release's archive, as tar names it in the C locale, by its
+/// path in the release's own `folder`: the only folder an archive holds.
+fn member(told: &[u8], folder: &str) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    // What is not printable ASCII is escaped.
+    let mut name = Vec::new();
+    let mut rest = told;
+    while let Some((&byte, after)) = rest.split_first() {
+        rest = after;
+        if byte != b'\\' {
+            name.push(byte);
+            continue;
+        }
+        let digits = after.get(..3).filter(|digits| digits.iter().all(|digit| matches!(digit, b'0'..=b'7')));
+        if let Some(digits) = digits {
+            name.push(u8::try_from(digits.iter().fold(0_u32, |value, digit| value * 8 + u32::from(digit - b'0'))).ok()?);
+            rest = &after[3..];
+            continue;
+        }
+        let (&escaped, after) = after.split_first()?;
+        name.push(match escaped {
+            b'a' => 7,
+            b'b' => 8,
+            b't' => b'\t',
+            b'n' => b'\n',
+            b'v' => 11,
+            b'f' => 12,
+            b'r' => b'\r',
+            b'\\' => b'\\',
+            _ => return None,
+        });
+        rest = after;
     }
-    if renameat_with(CWD, runtime, CWD, destination, RenameFlags::EXCHANGE).is_ok() {
-        return Ok(());
+    let path = PathBuf::from(std::ffi::OsString::from_vec(name));
+    let path = path.strip_prefix(".").unwrap_or(&path);
+    path.strip_prefix(folder).ok().map(Path::to_owned)
+}
+
+/// Checks that `runtime` is the complete `release`: its Wine, every member of
+/// its archive, and for the release our engine files are for, its Linux
+/// engine as Voile ships it.
+fn whole(runtime: &Path, release: &str, members: &[PathBuf]) -> Result<(), Failure> {
+    let linux = runtime.join(LINUX);
+    let complete = holds(runtime, release)
+        && members.iter().all(|member| fs::symlink_metadata(runtime.join(member)).is_ok())
+        && (release != engine_patch::release() || has_engine(&linux))
+        && engine_patch::pristine(&linux, release);
+    complete.then_some(()).ok_or(Failure::Damaged)
+}
+
+/// Exchanges the folders `staged` and `place`, in one step: there is no moment
+/// without a whole runtime at `place`.
+fn exchange(staged: &Path, place: &Path) -> Result<(), Failure> {
+    use rustix::{
+        fs::{CWD, RenameFlags, renameat_with},
+        io::Errno,
+    };
+    #[cfg(test)]
+    if tests::no_exchange(place) {
+        return Err(Failure::Exchange(place.to_owned()));
     }
-    // A file system that exchanges nothing: the one in place goes aside, and
-    // back if the new one cannot take its place.
-    let aside = runtime.with_extension("replaced");
-    fs::rename(destination, &aside)?;
-    fs::rename(runtime, destination).inspect_err(|_| {
-        let _ = fs::rename(&aside, destination);
+    renameat_with(CWD, staged, CWD, place, RenameFlags::EXCHANGE).map_err(|error| match error {
+        Errno::NOTSUP | Errno::INVAL | Errno::OPNOTSUPP => Failure::Exchange(place.to_owned()),
+        error => std::io::Error::from(error).into(),
     })
+}
+
+/// Whether the disk of `root` exchanges two folders, found before a download:
+/// one that does not is never written over (`Failure::Exchange`).
+fn exchanges(root: &Path) -> Result<(), Failure> {
+    let folder = || tempfile::Builder::new().prefix(UNFINISHED).tempdir_in(root);
+    let (one, other) = (folder()?, folder()?);
+    match exchange(one.path(), other.path()) {
+        Err(Failure::Exchange(_)) => Err(Failure::Exchange(root.to_owned())),
+        done => done,
+    }
 }
 
 /// Removes the releases in `root` games no longer run in: all but the newest

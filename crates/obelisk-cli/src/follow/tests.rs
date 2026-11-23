@@ -354,7 +354,7 @@ fn a_launch_tells_starting_then_running_with_the_game_s_process_then_its_exit() 
     let supervised = active(session("supervised", GamePhase::Preparing, true));
     assert_eq!(
         lines(&follow.observe(&launching(), &supervised, pid, now)),
-        [r#"{"event":"starting","app_id":438100}"#]
+        [r#"{"event":"starting","app_id":438100,"session_id":"supervised"}"#]
     );
     let running = active(session("supervised", GamePhase::Running, true));
     assert_eq!(
@@ -403,12 +403,34 @@ fn a_game_that_ran_and_exited_between_two_looks_still_tells_its_whole_life() {
     assert_eq!(
         lines(&follow.observe(&idle(), &finished, pid, Instant::now())),
         [
-            r#"{"event":"starting","app_id":438100}"#,
+            r#"{"event":"starting","app_id":438100,"session_id":"supervised"}"#,
             r#"{"event":"running","app_id":438100,"pid":null,"session_id":"supervised"}"#,
             r#"{"event":"exited","app_id":438100,"session_id":"supervised","frames":100,"exit_code":3,"exit_signal":null,"seconds":3600,"ended_by_request":false}"#,
             "end"
         ]
     );
+}
+
+/// Sixth verification, finding 3: the session a launch names is its own from
+/// the moment its supervisor took it, before its game runs; the name it has in
+/// this process before that is nobody's, and hides no short game's end.
+#[test]
+fn a_launch_names_its_own_session_before_its_game_runs() {
+    let mut follow = Play::new(VRCHAT, GORDON);
+    let now = Instant::now();
+    let admitted = active(session("admitted", GamePhase::Preparing, false));
+    assert!(follow.observe(&launching(), &admitted, pid, now).is_empty());
+    let finished = GameSessionsState {
+        last: Some(GameSessionState {
+            played: Some(played(Some(3))),
+            started_at: Some(now_secs()),
+            ..session("supervised", GamePhase::Finished, true)
+        }),
+        ..no_session()
+    };
+    let told = lines(&follow.observe(&idle(), &finished, pid, now));
+    assert_eq!(told[0], r#"{"event":"starting","app_id":438100,"session_id":"supervised"}"#);
+    assert!(told[2].starts_with(r#"{"event":"exited","app_id":438100,"session_id":"supervised""#));
 }
 
 #[test]
@@ -537,7 +559,7 @@ fn a_launch_that_needs_rosetta_declines_its_install_and_fails_as_rosetta_require
     assert_eq!(
         lines(&follow.observe(&launching(), &waiting, pid, now)),
         [
-            r#"{"event":"starting","app_id":438100}"#,
+            r#"{"event":"starting","app_id":438100,"session_id":"supervised"}"#,
             "decline rosetta supervised 7"
         ]
     );
@@ -582,7 +604,7 @@ fn a_cloud_question_before_the_game_starts_is_cancelled_and_fails_the_launch() {
         let question = asking(CloudSyncKind::Launch, kind);
         assert_eq!(
             lines(&follow.observe(&question, &supervised, pid, now)),
-            [r#"{"event":"starting","app_id":438100}"#, "cancel cloud 3"]
+            [r#"{"event":"starting","app_id":438100,"session_id":"supervised"}"#, "cancel cloud 3"]
         );
         assert!(follow.observe(&question, &supervised, pid, now).is_empty());
         assert_eq!(
@@ -637,11 +659,24 @@ fn a_launch_that_fails_before_its_game_tells_the_engine_s_reason_and_one_cancell
     let [PlayStep::End(Err(failure))] = &steps[..] else {
         panic!("{steps:?}");
     };
-    assert_eq!(failure.code, LAUNCH_FAILED);
+    // (until 0.1.9 `launch_failed`: whatever notices it, a file that is gone is `engine_files`)
+    assert_eq!(failure.code, crate::failure::ENGINE_FILES);
     assert_eq!(
         failure.key.as_deref(),
         Some("backend.runtime.wineIncomplete")
     );
+    assert_eq!(failure.engine.as_ref().unwrap().action, "repair");
+    let failed = InstallationsState {
+        report: Some(InstallationReport::Storefront {
+            key: "backend.steam.runtime.startFailed".into(),
+        }),
+        ..idle()
+    };
+    let steps = Play::new(VRCHAT, GORDON).observe(&failed, &no_session(), pid, Instant::now());
+    let [PlayStep::End(Err(failure))] = &steps[..] else {
+        panic!("{steps:?}");
+    };
+    assert_eq!(failure.code, LAUNCH_FAILED);
 
     let mut cancelled = Play::new(VRCHAT, GORDON);
     assert_eq!(

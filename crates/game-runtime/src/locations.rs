@@ -40,7 +40,7 @@ impl Locations {
             helpers,
             steam_runtime_package: crate::valve::payload(&steam_runtime_cache),
             steam_runtime_cache,
-            voile: library.join("Voile"),
+            voile: library.join(crate::voile::ROOT),
             wine_prefixes: library.join("Prefixes"),
             library: library.to_owned(),
             home: home.to_owned(),

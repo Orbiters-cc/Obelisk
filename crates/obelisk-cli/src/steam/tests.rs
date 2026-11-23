@@ -179,7 +179,7 @@ fn a_command_that_needs_an_account_fails_signed_out_before_it_makes_or_reaches_a
         out: &out,
     };
     assert_eq!(
-        run(steam.play(438100, vec!["--no-vr".into()], None))
+        run(steam.play(438100, None, vec!["--no-vr".into()], None))
             .unwrap_err()
             .code,
         NOT_SIGNED_IN
@@ -203,7 +203,7 @@ fn a_launch_without_its_helpers_fails_before_it_reaches_steam() {
         out: &out,
     };
     assert_eq!(
-        run(steam.play(438100, Vec::new(), Some(58))).unwrap_err().code,
+        run(steam.play(438100, None, Vec::new(), Some(58))).unwrap_err().code,
         HELPERS_MISSING
     );
     assert_eq!(run(steam.running()).unwrap_err().code, HELPERS_MISSING);
@@ -245,4 +245,31 @@ fn the_environment_s_locale_names_the_language_a_game_installs_in() {
     assert_eq!(steam_language("fr_FR.UTF-8".into()), "french");
     assert_eq!(steam_language("en".into()), "english");
     let _: PathBuf = places(Path::new("/root")).steam_sessions();
+}
+
+/// Sixth verification, the restart finding: the account a launch was asked for
+/// is checked against the credential it starts with, read once, before
+/// anything is started or reached; a later change of the saved account starts
+/// nothing for another one.
+#[test]
+fn a_launch_for_one_account_never_starts_for_another() {
+    let root = tempfile::tempdir().unwrap();
+    let places = places(root.path());
+    let (store, out) = (Memory::holding(gordon()), Told::default());
+    let steam = Steam {
+        places: &places,
+        store: &store,
+        out: &out,
+    };
+    let play = |steam_id| run(steam.play(438100, steam_id, Vec::new(), None)).unwrap_err().code;
+    assert_eq!(play(Some(gordon().steam_id + 1)), crate::failure::OTHER_ACCOUNT);
+    assert!(out.events().is_empty() && !places.library.exists());
+    // Its own goes on (as far as this test's missing helpers let it).
+    assert_eq!(play(Some(gordon().steam_id)), HELPERS_MISSING);
+    assert_eq!(play(None), HELPERS_MISSING);
+    // The saved account changes as the restart's last look is made.
+    let mut other = gordon();
+    other.steam_id += 1;
+    store.save(&other).unwrap();
+    assert_eq!(play(Some(gordon().steam_id)), crate::failure::OTHER_ACCOUNT);
 }

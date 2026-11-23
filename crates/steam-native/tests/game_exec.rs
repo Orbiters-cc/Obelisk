@@ -69,6 +69,7 @@ fn a_failed_exec_reports_failure_without_starting_a_replacement() {
             working_directory: "/tmp".into(),
             log: None,
             log_header: None,
+            guest_output: false,
         },
     );
     let result = child.wait_with_output().unwrap();
@@ -85,6 +86,7 @@ fn a_missing_or_invalid_admission_never_executes_the_target() {
         working_directory: "/tmp".into(),
         log: None,
         log_header: None,
+        guest_output: false,
     })
     .unwrap();
     let relative = serde_json::to_vec(&Admission {
@@ -93,6 +95,7 @@ fn a_missing_or_invalid_admission_never_executes_the_target() {
         working_directory: "/tmp".into(),
         log: None,
         log_header: None,
+        guest_output: false,
     })
     .unwrap();
     // Losing the supervisor before admission closes the pipe mid-message.
@@ -128,6 +131,7 @@ fn the_game_s_log_starts_with_its_header_then_holds_what_the_game_wrote() {
             working_directory: directory.clone(),
             log: Some(log.clone()),
             log_header: Some(header.into()),
+            guest_output: false,
         },
     );
     assert!(child.wait().unwrap().success());
@@ -194,6 +198,7 @@ fn the_game_keeps_the_helper_pid_its_environment_and_default_signals() {
             working_directory: directory.clone(),
             log: None,
             log_header: None,
+            guest_output: false,
         },
     );
     let (handshake, running, status) = confirm_replacement(&mut child, &directory);
@@ -205,40 +210,63 @@ fn the_game_keeps_the_helper_pid_its_environment_and_default_signals() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
-/// A game on the Linux engine gets the ends of its output's pipe through the
-/// helper it replaces, by the numbers its environment names.
+/// A game on the Linux engine gets the writing end of its output's pipe through
+/// the helper it replaces, by the number its environment then names.
 #[test]
-fn the_game_gets_the_ends_of_its_output_s_pipe() {
-    use std::io::Read;
-    use std::os::fd::AsRawFd;
+fn the_game_gets_the_end_of_its_output_s_pipe() {
     let directory = scratch("game-pipe");
+    let log = directory.join("wine-1.log");
     let (mut read, write) = std::io::pipe().unwrap();
-    let kept = read.try_clone().unwrap();
-    for end in [kept.as_raw_fd(), write.as_raw_fd()] {
-        // SAFETY: a descriptor of this test's, which it owns.
-        assert_eq!(unsafe { libc::fcntl(end, libc::F_SETFD, 0) }, 0);
-    }
-    let ends = format!("{} {}", kept.as_raw_fd(), write.as_raw_fd());
-    let mut helper = helper();
-    helper.env("OBELISK_LOG_PIPE", &ends);
-    let mut child = spawn(helper);
-    drop((kept, write));
+    let mut command = helper();
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(write)
+        .spawn()
+        .unwrap();
+    drop(command);
     admit(
         &mut child,
         &Admission {
             executable: "/bin/bash".into(),
             arguments: vec![
                 "-c".into(),
-                r#"read -r r w <<<"$OBELISK_LOG_PIPE"; : <&"$r" && echo guest >&"$w""#.into(),
+                r#"echo launcher >&2; echo guest >&"$OBELISK_LOG_PIPE""#.into(),
             ],
             working_directory: directory.clone(),
-            log: None,
+            log: Some(log.clone()),
             log_header: None,
+            guest_output: true,
         },
     );
     assert!(child.wait().unwrap().success());
     let mut told = String::new();
     read.read_to_string(&mut told).unwrap();
     assert_eq!(told, "guest\n");
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "launcher\n");
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// Sixth verification, the logging finding: a log that cannot be opened, or
+/// whose header cannot be written, starts the game all the same.
+#[test]
+fn a_log_that_cannot_be_opened_refuses_no_game() {
+    let directory = scratch("game-no-log");
+    // A folder that is not there, and a name too long for one.
+    for log in [directory.join("gone/wine-1.log"), directory.join("x".repeat(400))] {
+        let mut child = spawn(helper());
+        admit(
+            &mut child,
+            &Admission {
+                executable: "/bin/sh".into(),
+                arguments: vec!["-c".into(), "echo game >&2; exit 4".into()],
+                working_directory: directory.clone(),
+                log: Some(log),
+                log_header: Some("header\n".into()),
+                guest_output: false,
+            },
+        );
+        assert_eq!(child.wait().unwrap().code(), Some(4));
+    }
     std::fs::remove_dir_all(directory).unwrap();
 }

@@ -176,6 +176,9 @@ def refresh(path, history):
 def check(out):
     with open(os.path.join(out, "manifest.json")) as file:
         value = json.load(file)
+    named = sorted((entry["path"], entry["source"]) for entry in value["files"])
+    if named != sorted(FILES):
+        raise Failed(f"The manifest names {named}, not every file of the patch once.")
     for entry in value["files"]:
         if sha(os.path.join(out, entry["source"])) != entry["patched"]:
             raise Failed(f"{entry['source']} is not the file the manifest names.")

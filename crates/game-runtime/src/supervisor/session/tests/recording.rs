@@ -386,14 +386,13 @@ fn a_launch_on_the_linux_engine_without_its_pin_is_never_accepted() {
 }
 
 /// A game on the Linux engine that writes as its guest does: into the pipe its
-/// environment names, whose reading end it keeps as the launcher does.
+/// helper gets.
 const WRITING: &str = r#"
-r=${OBELISK_LOG_PIPE% *}; w=${OBELISK_LOG_PIPE#* }
-eval "exec 7<&$r 8>&$w $r<&- $w>&-"
+exec 8>&2
 echo "the guest begins" >&8
 printf ran > ran
 while [ ! -f release-game ]; do /bin/sleep 0.01; done
-i=0; while [ $i -lt 5000 ]; do echo "line $i" >&8; i=$((i+1)); done
+i=0; while [ $i -lt 20000 ]; do echo "line $i" >&8; i=$((i+1)); done
 echo "the guest ends" >&8
 printf done > wrote
 exit 3
@@ -430,7 +429,7 @@ fn what_a_guest_writes_reaches_its_log_through_its_supervisor() {
     let log = fs::read_to_string(run.directory.join("game.log")).unwrap();
     assert!(log.starts_with("the guest begins\n"), "{log:.200}");
     assert!(log.contains("line 199\n") && log.contains("the guest ends\n"), "{log:.200}");
-    assert!(log.contains("[obelisk-log: 5000 lines like this in all: line #]"), "{log:.200}");
+    assert!(log.contains("[obelisk-log: 20000 lines like this in all: line #]"), "{log:.200}");
     assert_eq!(run.client.snapshot(None).unwrap().exit_code, Some(3));
 }
 
@@ -449,5 +448,84 @@ fn a_guest_outlives_its_supervisor() {
     );
     std::thread::sleep(Duration::from_millis(200));
     run.release("release-game");
+    // (more than a pipe holds: it is drained all the same)
     run.wait_for("wrote");
+}
+
+/// Sixth verification, finding 1 (the verifier's fixture): a supervisor killed
+/// while its game runs lets nothing replace the game's files.
+#[test]
+fn a_killed_supervisor_s_game_keeps_its_files() {
+    let (wine, run) = writing();
+    let record = run.until(|record| record.phase == Phase::Running);
+    run.wait_for("ran");
+    let release = wine.path().join("Voile/v9.0.0-1");
+    assert!(held(&release));
+    assert!(
+        Process::new("/bin/kill")
+            .args(["-KILL", &record.supervisor.pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    for _ in 0..20 {
+        assert!(held(&release), "its game still runs");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    run.release("release-game");
+    run.wait_for("wrote");
+    free(&release);
+}
+
+/// Finding 1: a game whose supervisor is gone, and which no lock shows (an
+/// older build's), is found by the record of its launch and by what it runs.
+#[test]
+fn a_game_no_lock_shows_keeps_its_files() {
+    use crate::voile::live::tests::{Running, record};
+    let library = tempfile::tempdir().unwrap();
+    let (_, release) = on_the_linux_engine(library.path());
+    free(&release);
+    let program = Running::at(&release.join("linux/engine/fexdarwin-run"));
+    assert!(held(&release), "what it runs");
+    program.end();
+    free(&release);
+    // Rosetta's games hold no lock.
+    let wine = Running::at(&release.join("bin/wine"));
+    assert!(held(&release), "Rosetta's Wine");
+    wine.end();
+    free(&release);
+    let elsewhere = Running::at(&library.path().join("launcher"));
+    let game = elsewhere.identity();
+    let gone = Identity { birth_seconds: 1, ..game.clone() };
+    record(library.path(), "SteamSessions", gone, Some(game));
+    assert!(held(&release), "its record");
+    elsewhere.end();
+    free(&release);
+}
+
+/// Sixth verification, the logging finding: a log that cannot be had starts
+/// the game all the same, and the record says why it holds nothing.
+#[test]
+fn a_log_that_cannot_be_opened_refuses_no_game() {
+    let wine = tempfile::tempdir().unwrap();
+    let (config, _) = on_the_linux_engine(wine.path());
+    let (_, pin) = crate::voile::engine_patch::apply(&config.runtime).unwrap();
+    let (root, directory, sessions) = prepare(&Script {
+        wine: Some(config),
+        ..script(WRITING)
+    });
+    fs::create_dir(directory.join("game.log")).unwrap();
+    let client = start_pinned::<Recording>(&directory, &sessions, Some(&pin)).unwrap();
+    let run = Run::<Recording> {
+        _root: root,
+        directory,
+        sessions,
+        client,
+    };
+    let record = run.until(|record| record.log_failure.is_some());
+    assert!(record.log_failure.unwrap().starts_with("the log cannot be opened"));
+    run.release("release-game");
+    run.wait_for("wrote");
+    let record = run.until(|record| record.finished());
+    assert_eq!((record.phase, record.exit_code), (Phase::Finished, Some(3)));
 }

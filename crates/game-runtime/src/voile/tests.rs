@@ -1,5 +1,22 @@
 use super::*;
 
+/// Whether a test says that the disk of `place` exchanges nothing: a file
+/// beside the runtimes' folder.
+pub(super) fn no_exchange(place: &Path) -> bool {
+    place.ancestors().skip(1).take(2).any(|folder| folder.join("no-exchange").exists())
+}
+
+/// Where `a_repair_killed_anywhere_leaves_a_whole_runtime` is killed, and what
+/// takes a file where a test says so.
+pub(super) fn step(name: &str) {
+    if std::env::var("OBELISK_TEST_KILLED_AT").as_deref() == Ok(name) {
+        let _ = std::process::Command::new("/bin/kill")
+            .args(["-KILL", &std::process::id().to_string()])
+            .status();
+        std::thread::sleep(Duration::from_secs(10));
+    }
+}
+
 /// A release archive laid out as voile's package.sh makes it, with the Linux
 /// engine's runtime in its `linux` folder, and the release that pins it.
 /// `manifest_version` is what its runtime.json claims.
@@ -682,11 +699,238 @@ fn what_replaces_a_runtime_takes_its_place_in_one_step() {
         fs::create_dir(folder).unwrap();
         fs::write(folder.join("file"), text).unwrap();
     }
-    put_in_place(&new, &place).unwrap();
+    exchange(&new, &place).unwrap();
     assert_eq!(fs::read(place.join("file")).unwrap(), b"new");
     // The one it replaced is where the new one was, to go with its folder.
     assert_eq!(fs::read(new.join("file")).unwrap(), b"old");
     // A failure leaves the one in place.
-    assert!(put_in_place(&directory.path().join("gone"), &place).is_err());
+    assert!(exchange(&directory.path().join("gone"), &place).is_err());
     assert_eq!(fs::read(place.join("file")).unwrap(), b"new");
+}
+
+/// Sixth verification, ruling 1: a disk that exchanges nothing is never
+/// repaired over, and says so with the path, before any download.
+#[tokio::test]
+async fn a_disk_that_exchanges_nothing_is_not_repaired_in_place() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("Voile");
+    let (archive, release) = release_archive(directory.path(), "v1.0.0-2", "v1.0.0-2");
+    Install::new().install(&root, &release, Some(&archive)).await.unwrap();
+    fs::write(root.join("v1.0.0-2/kept"), "").unwrap();
+    fs::write(directory.path().join("no-exchange"), "").unwrap();
+    let failure = Install::new().put(&root, &release, Some(&root.join("no archive")), true).await;
+    assert_eq!(failure, Err(Failure::Exchange(root.clone())));
+    let told: serde_json::Value = serde_json::from_str(&failure.unwrap_err().to_string()).unwrap();
+    assert_eq!(told["key"], "backend.voile.noExchange");
+    assert_eq!(told["args"][0], root.to_string_lossy().as_ref());
+    assert!(root.join("v1.0.0-2/kept").exists());
+    assert_eq!(names(&root), ["v1.0.0-2"]);
+    // A release that is not there yet needs no exchange.
+    let (archive, release) = release_archive(directory.path(), "v1.0.0-3", "v1.0.0-3");
+    Install::new().install(&root, &release, Some(&archive)).await.unwrap();
+}
+
+/// Sixth verification, finding 2 (the verifier's fixture): an extraction that
+/// lost a file replaces nothing, the engine's own or any other of its archive.
+#[tokio::test]
+async fn an_extraction_that_lost_a_file_replaces_nothing() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("Voile");
+    let (archive, release) = release_archive(directory.path(), "v1.0.0-2", "v1.0.0-2");
+    Install::new().install(&root, &release, Some(&archive)).await.unwrap();
+    let place = root.join("v1.0.0-2");
+    let (staged, members) = Install::new().extract(&root, &release, Some(&archive)).await.unwrap();
+    let runtime = staged.path().join("voile-v1.0.0-2");
+    whole(&runtime, "v1.0.0-2", &members).unwrap();
+    for lost in ["linux/engine/fexdarwin-run", "linux/wine/bin/wine", "bin/wine", MANIFEST] {
+        let aside = directory.path().join("aside");
+        fs::rename(runtime.join(lost), &aside).unwrap();
+        assert_eq!(whole(&runtime, "v1.0.0-2", &members), Err(Failure::Damaged), "{lost}");
+        fs::rename(&aside, runtime.join(lost)).unwrap();
+    }
+    drop(staged);
+    assert!(place.join("linux/engine/fexdarwin-run").is_file());
+    // The release our files are for carries an engine, whatever its archive
+    // says: an archive without one is not that release.
+    let version = engine_patch::release();
+    let (archive, release) = release_archive(directory.path(), version, version);
+    let damaged = Install::new().install(&root, &release, Some(&archive)).await;
+    assert_eq!(damaged, Err(Failure::Damaged), "its engine files are not Voile's");
+    assert_eq!(names(&root), ["v1.0.0-2"]);
+}
+
+/// Finding 2 (the verifier's matrix): killed at any step, a repair leaves a
+/// whole runtime in place, the old one or the new one, and one that failed
+/// after it deletes nothing saved until a whole one is in place.
+#[test]
+fn a_repair_killed_anywhere_leaves_a_whole_runtime() {
+    for (step, expected) in [
+        ("before-extract", "old"),
+        ("after-untar", "old"),
+        ("after-extract", "old"),
+        ("after-validation", "old"),
+        ("after-lock", "old"),
+        ("after-exchange", "new"),
+        ("after-verification", "new"),
+        ("after-cleanup", "new"),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Voile");
+        let (archive, release) = release_archive(directory.path(), "v1.0.0-2", "v1.0.0-2");
+        lay(&root, "v1.0.0-2", r#"{"version": "v1.0.0-2"}"#);
+        fs::write(root.join("v1.0.0-2/old"), "").unwrap();
+        fs::write(
+            directory.path().join("release"),
+            format!("{}\n{}\n{}", archive.display(), release.size, release.sha256),
+        )
+        .unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "voile::tests::a_repair_of_a_test_s"])
+            .env("OBELISK_TEST_REPAIRED", directory.path())
+            .env("OBELISK_TEST_KILLED_AT", step)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(std::os::unix::process::ExitStatusExt::signal(&status), Some(9), "{step}");
+        let place = root.join("v1.0.0-2");
+        let whole = || {
+            has_wine(&place) && has_engine(&place.join(LINUX)) && version(&place).as_deref() == Some("v1.0.0-2")
+        };
+        assert!(whole(), "{step}");
+        assert_eq!(place.join("old").exists(), expected == "old", "{step}");
+        let saved = || {
+            remains(&root).iter().any(|staged| staged.join("voile-v1.0.0-2/old").exists())
+        };
+        if step == "after-exchange" {
+            assert!(saved(), "the one replaced is kept until the new one is verified in place");
+        }
+        // The next one cannot be made: nothing saved goes.
+        let kept = remains(&root).len();
+        let executor = crate::executor().unwrap();
+        let again = |archive: &Path| {
+            executor.block_on(async { Install::new().put(&root, &release, Some(archive), true).await })
+        };
+        assert!(again(&directory.path().join("no archive")).is_err());
+        assert!(whole(), "{step}");
+        assert_eq!(remains(&root).len(), kept, "{step}");
+        // Then it is, and nothing is left.
+        again(&archive).unwrap();
+        assert!(whole() && !place.join("old").exists());
+        assert_eq!(names(&root), ["v1.0.0-2"], "{step}");
+    }
+}
+
+/// The folders an install left in `root`.
+fn remains(root: &Path) -> Vec<PathBuf> {
+    names(root)
+        .into_iter()
+        .filter(|name| name.starts_with(UNFINISHED))
+        .map(|name| root.join(name))
+        .filter(|path| path.is_dir())
+        .collect()
+}
+
+/// Not a test of its own: the repair the one above kills.
+#[tokio::test]
+async fn a_repair_of_a_test_s() {
+    let Some(directory) = std::env::var_os("OBELISK_TEST_REPAIRED").map(PathBuf::from) else {
+        return;
+    };
+    let told = fs::read_to_string(directory.join("release")).unwrap();
+    let told: Vec<&str> = told.lines().collect();
+    let release = Release {
+        version: "v1.0.0-2".into(),
+        url: "https://example.invalid/voile.tar.xz".into(),
+        size: told[1].parse().unwrap(),
+        sha256: told[2].into(),
+    };
+    let _ = Install::new()
+        .put(&directory.join("Voile"), &release, Some(Path::new(told[0])), true)
+        .await;
+}
+
+/// Ruling 2: a repair never replaces a runtime while anything of its
+/// library's engine runs, whatever the locks say; a release that is not there
+/// yet can be installed beside the one a game runs in.
+#[tokio::test]
+async fn a_repair_waits_for_whatever_runs_and_a_new_release_does_not() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("Voile");
+    let (archive, release) = release_archive(directory.path(), "v1.0.0-2", "v1.0.0-2");
+    Install::new().install(&root, &release, Some(&archive)).await.unwrap();
+    let running = live::tests::Running::at(&root.join("v1.0.0-2/linux/graphics/bin/virgl_test_server"));
+    assert_eq!(Install::new().put(&root, &release, Some(&archive), true).await, Err(Failure::InUse));
+    assert!(root.join("v1.0.0-2/linux/graphics/bin/virgl_test_server").exists());
+    let (newer_archive, newer) = release_archive(directory.path(), "v1.0.0-3", "v1.0.0-3");
+    Install::new().install(&root, &newer, Some(&newer_archive)).await.unwrap();
+    remove_replaced(&root);
+    assert_eq!(names(&root), ["v1.0.0-2", "v1.0.0-3"], "nor is the one it replaced removed");
+    running.end();
+    remove_replaced(&root);
+    assert_eq!(names(&root), ["v1.0.0-3"]);
+}
+
+/// Ruling 6: the engine of the release in place is named whatever it lost, so
+/// that whoever starts a game there says what.
+#[test]
+fn an_engine_that_lost_its_program_is_still_the_one_games_run_on() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("Voile");
+    lay(&root, "v1.0.0-2", r#"{"version": "v1.0.0-2"}"#);
+    let linux = root.join("v1.0.0-2/linux");
+    assert_eq!(missing(&linux), Vec::<String>::new());
+    fs::remove_file(linux.join("engine/fexdarwin-run")).unwrap();
+    assert_eq!(linux_runtime(&root), Some(linux.clone()));
+    assert_eq!(missing(&linux), ["engine/fexdarwin-run"]);
+    // A release without an engine at all has none, but for the one whose
+    // engine files are ours to patch.
+    fs::remove_dir_all(&linux).unwrap();
+    assert_eq!(linux_runtime(&root), None);
+    let ours = engine_patch::release();
+    take_prereleases(&root, true).unwrap();
+    lay(&root, ours, &format!(r#"{{"version": "{ours}"}}"#));
+    fs::remove_dir_all(root.join(ours).join(LINUX)).unwrap();
+    assert_eq!(linux_runtime(&root), Some(root.join(ours).join(LINUX)));
+}
+
+/// What tar writes of a member, whatever its characters.
+#[test]
+fn a_member_s_name_is_read_as_tar_writes_it() {
+    let read = |told: &[u8]| member(told, "voile-v1.0.0-2");
+    assert_eq!(read(b"voile-v1.0.0-2/").unwrap(), Path::new(""));
+    assert_eq!(read(b"./voile-v1.0.0-2/bin/wine").unwrap(), Path::new("bin/wine"));
+    assert_eq!(read(br"voile-v1.0.0-2/e\314\201 \346\227\245/a\\b").unwrap(), Path::new("e\u{301} 日/a\\b"));
+    assert_eq!(read(b"elsewhere/bin/wine"), None);
+    assert_eq!(read(br"voile-v1.0.0-2/\q"), None);
+}
+
+/// With `OBELISK_VOILE_ARCHIVE` naming a real archive, `voile-<version>.tar.xz`:
+/// laid, found whole, and laid again over itself with our files in it.
+#[tokio::test]
+#[ignore = "needs OBELISK_VOILE_ARCHIVE and 5 GB"]
+async fn a_real_release_is_found_whole() {
+    let archive = PathBuf::from(std::env::var_os("OBELISK_VOILE_ARCHIVE").expect("an archive"));
+    let name = archive.file_name().unwrap().to_string_lossy().into_owned();
+    let release = Release {
+        version: name.strip_prefix("voile-").unwrap().strip_suffix(".tar.xz").unwrap().to_owned(),
+        url: "https://example.invalid/voile.tar.xz".into(),
+        size: fs::metadata(&archive).unwrap().len(),
+        sha256: crate::sha(&archive).unwrap(),
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("Voile");
+    let put = |again| {
+        let (root, release, archive) = (root.clone(), release.clone(), archive.clone());
+        async move { Install::new().put(&root, &release, Some(&archive), again).await }
+    };
+    let place = put(false).await.unwrap();
+    let linux = place.join(LINUX);
+    if release.version == engine_patch::release() {
+        assert_eq!(engine_patch::apply(&linux).unwrap().0, engine_patch::Keyboard::Mac);
+    }
+    fs::remove_file(linux.join("engine/fexdarwin-run")).unwrap();
+    assert_eq!(put(true).await.unwrap(), place);
+    assert!(has_engine(&linux) && engine_patch::pristine(&linux, &release.version));
+    assert_eq!(names(&root), [&*release.version]);
 }

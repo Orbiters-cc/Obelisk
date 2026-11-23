@@ -162,9 +162,6 @@ impl Adapter for LinuxEngine {
         locations: &crate::Locations,
         storefront: &dyn Furnisher,
     ) -> Result<Option<Pin>, Error> {
-        if !installed(config) {
-            return Err(Error::WineUnavailable);
-        }
         // The keyboard layout selected on the Mac, where the runtime is the
         // release the Orbiters fork's engine files are for; any other runs
         // as Voile shipped it. The files change only as one transaction and
@@ -176,9 +173,12 @@ impl Adapter for LinuxEngine {
             eprintln!("engine patch: not started: {refused}");
             Error::EngineFiles(refused.into())
         })?;
-        // Held: an install or a removal may have passed before the lock.
-        if !installed(config) {
-            return Err(Error::WineUnavailable);
+        // Held: what the engine starts from stays there from now on.
+        let missing = crate::voile::missing(&config.runtime);
+        if !missing.is_empty() {
+            let refused = crate::voile::engine_patch::Incoherent::missing(&config.runtime, missing);
+            eprintln!("engine patch: not started: {refused}");
+            return Err(Error::EngineFiles(refused.into()));
         }
         let direct3d = DIRECT3D.map(|library| config.runtime.join("windows").join(library));
         let neptune = config.runtime.join(WINE_DLLS).join(NEPTUNE);
@@ -201,10 +201,7 @@ impl Adapter for LinuxEngine {
         if !copy.exists() {
             fs::copy(&neptune, copy)?;
         }
-        match config.log.parent() {
-            Some(logs) => crate::files::private_directory(logs)?,
-            None => return Err(Error::Storage),
-        }
+        crate::wine::log_folder(config);
         translate_d3dmetal(config, &locations.helpers);
         Ok(Some(pin))
     }
@@ -374,11 +371,6 @@ fn prefix(rosetta: &Path) -> Result<PathBuf, Error> {
 /// The guest's home of an engine prefix.
 fn home(prefix: &Path) -> Result<&Path, Error> {
     prefix.parent().ok_or(Error::Storage)
-}
-
-/// Whether the runtime is in place.
-fn installed(config: &Config) -> bool {
-    config.runtime.join("engine/fexdarwin-run").is_file()
 }
 
 /// What every Wine command of the engine runs with in the guest, then the

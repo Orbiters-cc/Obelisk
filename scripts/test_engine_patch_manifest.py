@@ -51,12 +51,16 @@ class Publication(unittest.TestCase):
     def folder(self, root, name, content):
         path = os.path.join(root, name)
         os.mkdir(path)
-        with open(f"{path}/wsd", "wb") as file:
-            file.write(content)
-        digest = m.sha(f"{path}/wsd")
-        with open(f"{path}/manifest.json", "wb") as file:
-            file.write(manifest_bytes(digest))
+        for _, source in m.FILES:
+            with open(f"{path}/{source}", "wb") as file:
+                file.write(content)
+        self.manifest(path, m.FILES)
         return path
+
+    def manifest(self, path, files):
+        entries = [{"path": at, "source": source, "original": "a" * 64, "patched": m.sha(f"{path}/{source}")} for at, source in files]
+        with open(f"{path}/manifest.json", "w") as file:
+            json.dump({"voile": "v1", "files": entries}, file)
 
     def test_the_new_folder_takes_the_old_one_s_place_in_one_step(self):
         with tempfile.TemporaryDirectory() as root:
@@ -86,6 +90,21 @@ class Publication(unittest.TestCase):
             with open(f"{dest}/wsd", "rb") as file:
                 self.assertEqual(file.read(), b"old")
             self.assertEqual(sorted(os.listdir(root)), ["dest", "new", "new2"])
+
+    def test_a_patch_that_is_not_every_file_once_is_never_published(self):
+        """Sixth verification (the verifier's): a manifest declaring no file replaced a good folder."""
+        for files in ([], m.FILES[:4], m.FILES + m.FILES[:1], [("engine/other", "wsd"), *m.FILES[1:]]):
+            with tempfile.TemporaryDirectory() as root:
+                new, dest = self.folder(root, "new", b"new"), self.folder(root, "dest", b"old")
+                self.manifest(new, files)
+                if not files:
+                    for _, source in m.FILES:
+                        os.remove(f"{new}/{source}")
+                with self.assertRaises(m.Failed):
+                    m.publish(new, dest)
+                with open(f"{dest}/wsd", "rb") as file:
+                    self.assertEqual(file.read(), b"old")
+                self.assertEqual(sorted(os.listdir(root)), ["dest", "new"])
 
 
 if __name__ == "__main__":

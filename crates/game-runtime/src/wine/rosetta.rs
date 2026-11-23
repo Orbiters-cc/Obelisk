@@ -118,11 +118,9 @@ impl Adapter for RosettaWine {
         boot(config, &locations.home)?;
         storefront.furnish_prefix(config)?;
         install_prerequisites(config, &locations.home, &storefront.prerequisites_to_run()?)?;
-        match config.log.parent() {
-            Some(logs) => crate::files::private_directory(logs)?,
-            None => return Err(Error::Storage),
-        }
-        // Its runtime's files change only with a new release's folder.
+        crate::wine::log_folder(config);
+        // It holds no pin: what replaces its runtime's files proves first
+        // that nothing of the library's engine runs (`voile/live.rs`).
         Ok(None)
     }
 

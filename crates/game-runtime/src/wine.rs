@@ -663,6 +663,17 @@ fn remove_prefixes(
     Ok(())
 }
 
+/// Makes the folder of the log of a game run by `config`. One that cannot be
+/// made is told with the log that cannot be opened there: a game never waits
+/// on its log.
+fn log_folder(config: &Config) {
+    if let Some(logs) = config.log.parent()
+        && let Err(error) = crate::files::private_directory(logs)
+    {
+        eprintln!("the log's folder {} cannot be made: {error}", logs.display());
+    }
+}
+
 /// Where Wine logs `game`: in its storefront's diagnostics folder.
 fn log(locations: &crate::Locations, game: crate::profile::Game<'_>) -> PathBuf {
     crate::diagnostics::game_log(&locations.home, game.into(), Platform::Windows)
@@ -773,7 +784,7 @@ pub fn end_orphans(voile: &Path) -> usize {
 }
 
 /// The processes of an `lsof -Fpn` listing that run files from `root`.
-fn running_from(listing: &str, root: &Path, own: u32) -> Vec<u32> {
+pub(crate) fn running_from(listing: &str, root: &Path, own: u32) -> Vec<u32> {
     let mut found = Vec::new();
     let mut pid = None;
     for line in listing.lines() {

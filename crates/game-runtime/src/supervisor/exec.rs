@@ -8,14 +8,13 @@
 //! A confirmed exec starts the game; only reaping that child ends it.
 //! Inspection supplies durable identities, never permission to abandon a child.
 use super::{Error, Identity, StartingGame, Target};
-use crate::game_log::{Pipe, Writer};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     convert::Infallible,
     io::{self, BufRead, Read, Write},
     os::{
-        fd::OwnedFd,
+        fd::{IntoRawFd, OwnedFd},
         unix::{net::UnixStream, process::CommandExt},
     },
     path::{Path, PathBuf},
@@ -44,6 +43,10 @@ pub struct Admission {
     /// What the log starts with, before the game writes to it.
     #[serde(default)]
     pub log_header: Option<String>,
+    /// The helper's own standard error is where the game's guest writes: the
+    /// game gets it under the number `game_log::END` then names.
+    #[serde(default)]
+    pub guest_output: bool,
 }
 
 impl Admission {
@@ -55,6 +58,7 @@ impl Admission {
             working_directory: target.working_directory.clone(),
             log: target.log.clone(),
             log_header,
+            guest_output: false,
         }
     }
 }
@@ -122,26 +126,34 @@ fn confirmation() -> io::Result<std::fs::File> {
 
 fn exec(input: impl Read) -> io::Result<Infallible> {
     let admission = receive(input)?;
-    Err(Command::new(&admission.executable)
+    let mut command = Command::new(&admission.executable);
+    command
         .args(&admission.arguments)
         .current_dir(&admission.working_directory)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(standard_error(&admission)?)
-        .exec())
+        .stdout(Stdio::null());
+    if admission.guest_output {
+        use crate::game_log::{END, LOWEST, NOWHERE};
+        // Kept through the exec, here where nothing else is ever started.
+        let end = rustix::io::fcntl_dupfd_cloexec(io::stderr(), LOWEST)
+            .and_then(|end| rustix::io::fcntl_setfd(&end, rustix::io::FdFlags::empty()).map(|()| end));
+        let end = end.map_or_else(|_| NOWHERE.to_owned(), |end| end.into_raw_fd().to_string());
+        command.env(END, end);
+    }
+    Err(command.stderr(standard_error(&admission)).exec())
 }
 
 /// The game's standard error: its log, emptied for this launch and started
-/// with its header, or nothing.
-fn standard_error(admission: &Admission) -> io::Result<Stdio> {
-    let Some(log) = &admission.log else {
-        return Ok(Stdio::null());
+/// with its header. A log that cannot be had is nothing, and refuses no game:
+/// its supervisor, which then cannot open it either, says so.
+fn standard_error(admission: &Admission) -> Stdio {
+    let Some(Ok(mut log)) = admission.log.as_deref().map(crate::diagnostics::open_log) else {
+        return Stdio::null();
     };
-    let mut log = crate::diagnostics::open_log(log)?;
     if let Some(header) = &admission.log_header {
-        log.write_all(header.as_bytes())?;
+        let _ = log.write_all(header.as_bytes());
     }
-    Ok(log.into())
+    log.into()
 }
 
 /// The supervisor's side: an exec helper ready to spawn, with the game it
@@ -152,8 +164,6 @@ pub(crate) struct Helper {
     admission: Admission,
     /// The game's executable, as inspection names it once the helper became it.
     expected: PathBuf,
-    /// Where its guest writes its output, for a game on the Linux engine.
-    output: Option<Pipe>,
 }
 
 impl Helper {
@@ -184,39 +194,35 @@ impl Helper {
             pipe,
             admission,
             expected,
-            output: None,
         })
     }
 
-    /// The game's guest writes its output into `pipe`, whose ends the helper
-    /// and the game it becomes get, named to them by their environment.
-    pub(crate) fn logged(mut self, pipe: Option<Pipe>) -> Self {
-        if let Some(pipe) = &pipe {
-            self.command.env(crate::game_log::ENDS, pipe.ends());
+    /// The game's guest writes its output into `end` of a pipe, or nowhere
+    /// without one. It is the helper's standard error, which the helper hands
+    /// the game it becomes: no other process this one starts ever gets it.
+    pub(crate) fn guest_output(mut self, end: Option<OwnedFd>) -> Self {
+        match end {
+            Some(end) => {
+                self.command.stderr(end);
+                self.admission.guest_output = true;
+            }
+            None => {
+                self.command.env(crate::game_log::END, crate::game_log::NOWHERE);
+            }
         }
-        self.output = pipe;
         self
     }
 
-    /// Spawns the helper, which waits for its admission. What its guest
-    /// writes goes nowhere until the writer is told where.
-    pub(crate) fn spawn(self) -> Result<(Child, Option<Writer>), Error> {
+    /// Spawns the helper, which waits for its admission.
+    pub(crate) fn spawn(self) -> Result<Child, Error> {
         let mut command = tokio::process::Command::from(self.command);
-        let mut spawn = || command.kill_on_drop(false).spawn().map_err(|_| Error::StartFailed);
-        let (child, writer) = match self.output {
-            Some(pipe) => {
-                let (child, writer) = pipe.inherited(&mut spawn)?;
-                (child?, Some(writer))
-            }
-            None => (spawn()?, None),
-        };
-        let child = Child {
+        let child = command.kill_on_drop(false).spawn().map_err(|_| Error::StartFailed)?;
+        Ok(Child {
             child,
             pipe: Some(self.pipe),
             admission: self.admission,
             expected: self.expected,
-        };
-        Ok((child, writer))
+        })
     }
 }
 

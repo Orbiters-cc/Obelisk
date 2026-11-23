@@ -18,8 +18,9 @@ Commands:
   steam installed                     List the installed games
   steam install <app_id> [--language <locale>]
                                       Install or update the Windows build of a game
-  steam play <app_id> [--render-percent <1..100>] [-- <args>...]
+  steam play <app_id> [--steam-id <id>] [--render-percent <1..100>] [-- <args>...]
                                       Start an installed game and follow it until it ends;
+                                      --steam-id starts it for that Steam account or not at all,
                                       --render-percent draws it at that share of the display's
                                       pixels per side, for this launch only (Linux engine)
   steam running                       List the live Game sessions
@@ -60,6 +61,8 @@ pub enum Command {
     },
     Play {
         app_id: u32,
+        /// The only Steam account the game may start for.
+        steam_id: Option<u64>,
         /// What starts the game after its own arguments, as given.
         arguments: Vec<String>,
         /// The render percent of this launch alone, over the installation's own choice.
@@ -210,8 +213,9 @@ fn command(mut words: Words, game: Vec<String>) -> Result<Command, Failure> {
         Some(word) => return Err(usage(format!("{word} is not expected here: see --help."))),
     }
     Ok(match command {
-        Command::Play { app_id, render_percent, .. } => Command::Play {
+        Command::Play { app_id, steam_id, render_percent, .. } => Command::Play {
             app_id,
+            steam_id,
             arguments: game,
             render_percent,
         },
@@ -239,16 +243,29 @@ fn steam(words: &mut Words) -> Result<Command, Failure> {
         }
         "play" => {
             let app_id = app_id(words.next(), "steam play")?;
-            let mut render_percent = None;
-            if words.words.as_slice().first().map(String::as_str) == Some("--render-percent") {
-                words.next();
-                let value = words.value("--render-percent")?;
-                render_percent = match value.parse::<u32>() {
-                    Ok(percent @ 1..=100) if value.bytes().all(|byte| byte.is_ascii_digit()) => Some(percent),
-                    _ => return Err(usage(format!("--render-percent takes 1 to 100, not {value}."))),
-                };
+            let (mut steam_id, mut render_percent) = (None, None);
+            loop {
+                match words.words.as_slice().first().map(String::as_str) {
+                    Some("--steam-id") => {
+                        words.next();
+                        let value = words.value("--steam-id")?;
+                        steam_id = match value.parse::<u64>() {
+                            Ok(id) if id != 0 && value.bytes().all(|byte| byte.is_ascii_digit()) => Some(id),
+                            _ => return Err(usage("--steam-id takes a Steam account's number.")),
+                        };
+                    }
+                    Some("--render-percent") => {
+                        words.next();
+                        let value = words.value("--render-percent")?;
+                        render_percent = match value.parse::<u32>() {
+                            Ok(percent @ 1..=100) if value.bytes().all(|byte| byte.is_ascii_digit()) => Some(percent),
+                            _ => return Err(usage(format!("--render-percent takes 1 to 100, not {value}."))),
+                        };
+                    }
+                    _ => break,
+                }
             }
-            Command::Play { app_id, arguments: Vec::new(), render_percent }
+            Command::Play { app_id, steam_id, arguments: Vec::new(), render_percent }
         }
         "quit" => {
             let app_id = app_id(words.next(), "steam quit")?;
@@ -433,6 +450,7 @@ mod tests {
             command_of(&["steam", "play", "438100"]),
             Command::Play {
                 app_id: 438100,
+                steam_id: None,
                 arguments: Vec::new(),
                 render_percent: None
             }
@@ -451,6 +469,7 @@ mod tests {
             ]),
             Command::Play {
                 app_id: 438100,
+                steam_id: None,
                 arguments: vec![
                     "--no-vr".into(),
                     "--library".into(),
@@ -465,6 +484,7 @@ mod tests {
             command_of(&["steam", "play", "438100", "--"]),
             Command::Play {
                 app_id: 438100,
+                steam_id: None,
                 arguments: Vec::new(),
                 render_percent: None
             }
@@ -477,6 +497,7 @@ mod tests {
             command_of(&["steam", "play", "438100", "--render-percent", "58", "--", "--no-vr"]),
             Command::Play {
                 app_id: 438100,
+                steam_id: None,
                 arguments: vec!["--no-vr".into()],
                 render_percent: Some(58)
             }
@@ -486,10 +507,29 @@ mod tests {
             command_of(&["steam", "play", "438100", "--", "--render-percent", "58"]),
             Command::Play {
                 app_id: 438100,
+                steam_id: None,
                 arguments: vec!["--render-percent".into(), "58".into()],
                 render_percent: None
             }
         );
+    }
+
+    #[test]
+    fn the_account_a_game_starts_for_is_named_before_its_arguments() {
+        for line in [
+            &["steam", "play", "438100", "--steam-id", "76561197960265729", "--render-percent", "58", "--", "--no-vr"][..],
+            &["steam", "play", "438100", "--render-percent", "58", "--steam-id", "76561197960265729", "--", "--no-vr"],
+        ] {
+            assert_eq!(
+                command_of(line),
+                Command::Play {
+                    app_id: 438100,
+                    steam_id: Some(76561197960265729),
+                    arguments: vec!["--no-vr".into()],
+                    render_percent: Some(58)
+                }
+            );
+        }
     }
 
     #[test]
@@ -523,6 +563,10 @@ mod tests {
             &["steam", "play", "0"],
             &["steam", "play", "+438100"],
             &["steam", "play", "438100", "--no-vr"],
+            &["steam", "play", "438100", "--steam-id"],
+            &["steam", "play", "438100", "--steam-id", "0"],
+            &["steam", "play", "438100", "--steam-id", "gordon"],
+            &["steam", "play", "438100", "--steam-id", "+76561197960265729"],
             &["steam", "play", "438100", "--render-percent"],
             &["steam", "play", "438100", "--render-percent", "0"],
             &["steam", "play", "438100", "--render-percent", "101"],
