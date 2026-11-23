@@ -1,0 +1,90 @@
+{
+ "voile": "v26.3.0-27.beta1",
+ "sources": {
+  "voile-lkd": {
+   "commit": "b5d796cd31f78d7865843598907db595b40d9b49",
+   "base": "3a299f21da9e0553ac7c8cf658f0df4734f96e8a"
+  },
+  "neptune": {
+   "commit": "40b4ebc17f6e4d6cfe50ffaea93806db46db4c05",
+   "base": "92f928c65764b2857ff8e7d6d5075ffcc01b94a0"
+  },
+  "dxmt": {
+   "commit": "4e3a95286f3a1b1ffa81119ad471e25e51b05b0d",
+   "base": "b7d97ee715fdfa8dc7ccd8c0ddbad7a22ac125f3"
+  }
+ },
+ "files": [
+  {
+   "path": "engine/wsd",
+   "source": "wsd",
+   "original": "3713717453718d0ab3f45a7a35d4ba26dc6f7bb7ccd1607171c83b3cef57ab69",
+   "released": "943a0b3c82af1e516926b3488b9116e71dde01c002a7806ec8dc83a1b55049fe",
+   "timeline": "65ded907d1cb7a043d8c1cd73d8e677a1912b7171c9d84de71e81a1264b3acc5"
+  },
+  {
+   "path": "graphics/dxmt-native.framework/Versions/A/dxmt-native",
+   "source": "dxmt-native",
+   "original": "a3730fcbc2efb9b1f403e637bd4fe079d29260005228041c0ef325535aa31120",
+   "released": "a3730fcbc2efb9b1f403e637bd4fe079d29260005228041c0ef325535aa31120",
+   "timeline": "50b16da1a682106b74533153e837729d031949dd857671f88cd09a1bf3ae8a17"
+  },
+  {
+   "path": "graphics/lib/libvirglrenderer.1.dylib",
+   "source": "libvirglrenderer.1.dylib",
+   "original": "1b1a1291f22c61d3f84f9b7782dbe9957eb1a51e3baa53c28745d9c9c0e65735",
+   "released": "1b1a1291f22c61d3f84f9b7782dbe9957eb1a51e3baa53c28745d9c9c0e65735",
+   "timeline": "f1a6baeb4157a87e87de9e37d8893732579c8efebe29d538a81d9bc6f09ae9f1"
+  },
+  {
+   "path": "graphics/libexec/virgl_render_server",
+   "source": "virgl_render_server",
+   "original": "792c7f355f39ac65b3eb436e0a1215a9ab3305c5d5248ab44c672d17bdbe32e5",
+   "released": "d40375f6dc2cc341c0e57eb426040ec3042676eaef5cb350a16db77acba5f240",
+   "timeline": "1e780e57cae2d24673d438d35f36d05f6da6e78e11223ca937f15c0109e0f7a2"
+  }
+ ],
+ "guest": {
+  "fexdarwin-run": {
+   "entries": 1,
+   "sha256": "1305064f0a25ce4a50ffc5f7bc2db8ecda1d7e9fcea04eb9e90a1dadbf2e98e6",
+   "identical": true
+  },
+  "Wine": {
+   "entries": 1769,
+   "sha256": "32e469e00ba09ef298c1eb6e3c4232a63cac29e419cceaa061e839c4e972b889",
+   "identical": true
+  },
+  "Neptune's guest driver (Direct3D)": {
+   "entries": 3,
+   "sha256": "9200a48745d1ff4251807e2d6ba0605210036888ac9b8fe53d9e3b7eed0a0a8a",
+   "identical": true
+  },
+  "nptunix": {
+   "entries": 2,
+   "sha256": "bef2264e86e547c2297280329ab243a6eede0324243c7abb77cb0c0342699de1",
+   "identical": true
+  },
+  "the Wine driver (wineobelisk)": {
+   "entries": 2,
+   "sha256": "317692e27a1aba032859b089b4385874a28a2c408d336a25dfcafa30207f7f91",
+   "identical": true
+  },
+  "the guest's root": {
+   "entries": 8426,
+   "sha256": "2a3c80ffe6c83224848d8302371b5992712e7fb57f3aa038f4124eb49a5b76f5",
+   "identical": true
+  },
+  "the guest's libraries": {
+   "entries": 1,
+   "sha256": "de36587ca16e861a74e2f108de20e7ddc39ef1c4b90e8be5b24924134ecdb9f5",
+   "identical": true
+  },
+  "Valve's client in the guest": {
+   "entries": 5,
+   "sha256": "dabb31da70c049062962803972bd150c3d80196e9c330a46b7b5dac4eb8473dd",
+   "identical": true
+  }
+ },
+ "rest_sha256": "0a954bfbe6fc2b684f042bef3212ede5240d79dd8c4ee9c24c126ee54af04f8c"
+}

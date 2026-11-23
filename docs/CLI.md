@@ -20,6 +20,7 @@ This file is the contract a program is written against. Tests in `crates/obelisk
 - [Questions answered in the player's place](#questions-answered-in-the-players-place)
 - [What the app does and this program does not](#what-the-app-does-and-this-program-does-not)
 - [Building and signing](#building-and-signing)
+- [The timeline generation (developers only)](#the-timeline-generation-developers-only)
 
 ## State of this build
 
@@ -554,3 +555,26 @@ The tests reach neither Steam nor the Keychain. `cargo test -p obelisk-cli -- --
 The engine files of [Keyboard layout](#keyboard-layout) and [Graphics](#graphics) are checked in, in `crates/game-runtime/engine-patch`, and built by `scripts/build-engine-patch.sh` from an installed copy of the Voile release they are for (as Voile ships it: not one this program already patched) and checkouts of the forks: voile-lkd for `wsd` and `fexdarwin-run` (with `FEX`, a checkout of Zagrios/FEX at the release's commit with its submodules, cmake and ninja; FEX is configured with Homebrew's prefix ignored, since its configure takes fmt and others from Homebrew where it finds them and the release was built without), voile-wine with zig 0.16.0 for the driver (a `wsd` built without it must keep the `wsd_protocol.h` of the voile-lkd commit the checked-in driver goes with), neptune with meson, ninja and pkg-config for the render servers. The manifest it writes lists for each file every SHA-256 an earlier committed manifest or `cli-v*` tag had at that path (`previous`), and it writes none that leaves one out: a new build always replaces the files of every earlier one. A part whose checkout is not given keeps the file checked in, once its SHA-256 is the manifest's. The script refuses sources that are not that release's commits plus ours, a toolchain that does not rebuild the release's own driver byte for byte of code, and one that does not rebuild its render servers byte for byte but for the linker's UUID and the ad hoc signature (the UUID comes from the debug map before the strip, which names the folders Voile's CI built in). Each run gives the render servers a new UUID, hence new SHA-256s. Run it again for each Voile release to follow.
 
 `obelisk-cli` version is the `version` of `crates/obelisk-cli/Cargo.toml`; its releases are tagged `cli-v<version>` on the `cli` branch. It is licensed under the GNU General Public License v3.0, as Obelisk is.
+
+## The timeline generation (developers only)
+
+Nothing of this section is in a release: only a build with the Cargo feature `developer-timeline` (`cargo build -p obelisk-cli --features developer-timeline`) has it, and Orbiters - N4N0 never uses it. It exists to measure where a frame's time goes on the Mac (branch `perf-timeline` of this fork and of Orbiters-cc/voile-lkd, neptune and dxmt; voile-lkd's `tools/timeline/README.md`).
+
+It is one more complete set of engine files for the same Voile release: the released set with instrumented host programs in place of four files (`engine/wsd`, `graphics/libexec/virgl_render_server`, `graphics/lib/libvirglrenderer.1.dylib`, `graphics/dxmt-native.framework/Versions/A/dxmt-native`). Everything the emulated game runs, loads or maps (`fexdarwin-run`, Wine and its driver, Neptune's guest driver, `nptunix`, the guest's root) is the released set's, byte for byte: `scripts/build-timeline-generation.sh` compares every entry of the two trees, prints the comparison and writes nothing when anything else differs. It also refuses a binary that loads anything but macOS's own libraries and the generation's, or that holds a path into a build tree. The digests are built in (`engine-patch/timeline.json`); the files come from the folder the script wrote.
+
+| Variable | |
+| --- | --- |
+| `OBELISK_DEVELOPER_ENGINE` | `timeline`: this process puts the timeline generation in place and starts games on it, and on nothing else. `released`, or unset: the released set, as every build does; files of the timeline generation that are in place are replaced before any game starts, and a game does not start on them when they cannot be. Anything else is a `usage` error. |
+| `OBELISK_DEVELOPER_ENGINE_FILES` | The generation's folder, an absolute path. Needed by `timeline`, and by `released` to put back the two files no build carries (Voile's own, kept in its `original/`). |
+| `OBELISK_TIMELINE` | With the timeline generation only: an existing folder outside everything the game sees. The window server and the render server record into a folder of the start in it; the launcher takes the three variables away before anything else starts, so neither the game nor the emulator that runs it ever has them. |
+| `OBELISK_TIMELINE_MB` | 1 to 8192 (1024): what one start's recorders may write in all. They stop for good there. |
+| `OBELISK_TIMELINE_PASSES` | 0 to 1000 (0): the encoders and their GPU times of every so many frames. |
+
+`engine generation` puts the generation this process was asked for in place, as a launch does and by the same code (one recorded transaction under the library's locks, refused while anything of the engine runs), proves it, and tells one `engine_generation` line: `generation`, `voile`, and `engine_files` (each `path` with its `sha256`). `engine rehearse <folder> <program> <1..100> <log> [-- <argument>...]` runs an owned Windows program of that folder as a game starts on the engine, without Steam, and tells `rehearsal_running` (`pid`) and `rehearsal_exited` (`exit_code`).
+
+```sh
+OBELISK_DEVELOPER_ENGINE=timeline OBELISK_DEVELOPER_ENGINE_FILES=<folder> obelisk-cli engine generation   # in
+OBELISK_DEVELOPER_ENGINE=released OBELISK_DEVELOPER_ENGINE_FILES=<folder> obelisk-cli engine generation   # back out
+```
+
+A released obelisk-cli that finds the timeline generation in a library takes its files for foreign ones: it starts no game (`engine_files`, `repair`) until the generation is put back as above, or `engine repair` lays the release again.

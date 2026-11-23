@@ -7,6 +7,8 @@
 //! same order, and keeps a library, a Steam session and a cache of its own.
 mod arguments;
 mod credentials;
+#[cfg(feature = "developer-timeline")]
+mod developer;
 mod engine;
 mod events;
 mod failure;
@@ -51,6 +53,8 @@ fn run(out: &dyn Sink) -> Result<(), Failure> {
         }
         _ => {}
     }
+    #[cfg(feature = "developer-timeline")]
+    developer::select()?;
     let places = Places::of_process(invocation.library, invocation.helpers)?;
     // Nobody is there to answer a Keychain question: a session this program
     // may not read fails its command instead of waiting for one.
@@ -91,6 +95,12 @@ async fn dispatch(
             session,
         } => steam.quit(app_id, force, wait, session).await,
         Command::EngineRepair => engine::repair(Path::new(&places.locations().voile), places, None, out).await,
+        #[cfg(feature = "developer-timeline")]
+        Command::EngineGeneration => developer::generation(places).await,
+        #[cfg(feature = "developer-timeline")]
+        Command::EngineRehearse { install, program, percent, log, arguments } => {
+            developer::rehearse(places, install, program, percent, log, arguments).await
+        }
         Command::Prereleases(take) => prereleases(places, take).map(|event| out.emit(event)),
     }
 }

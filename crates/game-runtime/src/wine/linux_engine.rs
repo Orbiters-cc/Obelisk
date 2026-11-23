@@ -229,6 +229,12 @@ impl Adapter for LinuxEngine {
         // log, where Orbiters - N4N0's incident capture finds it. The launcher starts each session with a new one.
         environment.insert(EVENT_RING.to_owned(), config.log.with_extension("lkd-events").to_string_lossy().into_owned());
         let install = game.install.canonicalize()?;
+        #[cfg(feature = "developer-timeline")]
+        {
+            let mut seen = vec![install.as_path(), config.runtime.as_path(), home(&config.prefix)?];
+            seen.extend(guest.binds.iter().map(|(_, folder)| folder.as_path()));
+            environment.extend(super::timeline::variables(&seen));
+        }
         let working_directory = guest_path(&install, Path::new(&launched.working_directory))
             .unwrap_or_else(|| GAME.to_owned());
         let mut arguments = vec![

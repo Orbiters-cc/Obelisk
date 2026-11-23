@@ -37,6 +37,15 @@ fi
 # The Steam host's discovery adapter is for macOS games; no process here needs it. On a Mac with SIP off, dyld also
 # inserts it into the system tools this script runs (mkdir, tr, tail), which are arm64e and abort without that slice.
 unset DYLD_INSERT_LIBRARIES
+# The host timeline (developers only: linux_engine.rs gives it, off without a folder): the window server and the render
+# server record where a frame's time goes, into a folder of this start. Its variables are theirs alone: they are gone from
+# here on, whoever set them, and set again only for those two.
+timeline=${OBELISK_TIMELINE-} timeline_mb=${OBELISK_TIMELINE_MB-} timeline_passes=${OBELISK_TIMELINE_PASSES-}
+unset OBELISK_TIMELINE OBELISK_TIMELINE_MB OBELISK_TIMELINE_PASSES
+if [ -n "$timeline" ]; then
+    timeline="$timeline/$(date +%Y%m%d-%H%M%S)-$$"
+    mkdir -m 700 "$timeline" || timeline=
+fi
 runtime=$1 home=$2 install=$3 cwd=$4
 shift 4
 graphics=dxmt render_percent= game_mode=on binds= guest_env=()
@@ -178,6 +187,11 @@ else
     render=$(render_server "$runtime/graphics/libexec/virgl_render_server" dxmt) || exit 1
 fi
 
+if [ -n "$timeline" ]; then
+    export OBELISK_TIMELINE="$timeline"
+    [ -n "$timeline_mb" ] && export OBELISK_TIMELINE_MB="$timeline_mb"
+    [ -n "$timeline_passes" ] && export OBELISK_TIMELINE_PASSES="$timeline_passes"
+fi
 "$app/Contents/MacOS/wsd" --dir "$sockets" ${render_percent:+--render-percent "$render_percent"} 9>&- &
 helpers+=($!)
 if [ "$graphics" = d3dmetal ]; then
@@ -199,6 +213,7 @@ else
         "$runtime/graphics/bin/virgl_test_server" --no-virgl --no-fork --socket-path "$sockets/vtest.sock" 9>&- &
 fi
 helpers+=($!)
+unset OBELISK_TIMELINE OBELISK_TIMELINE_MB OBELISK_TIMELINE_PASSES
 # The input service gives the Mac's gamepads to Wine's Obelisk bus. A runtime without it starts the game without
 # gamepads.
 input=

@@ -78,6 +78,12 @@ pub enum Command {
         session: Option<String>,
     },
     EngineRepair,
+    /// The generation of engine files this process was asked for, put in place (docs/CLI.md, developers only).
+    #[cfg(feature = "developer-timeline")]
+    EngineGeneration,
+    /// An owned program on the engine (docs/CLI.md, developers only).
+    #[cfg(feature = "developer-timeline")]
+    EngineRehearse { install: PathBuf, program: PathBuf, percent: u32, log: PathBuf, arguments: Vec<String> },
     Prereleases(bool),
 }
 
@@ -122,6 +128,15 @@ impl Guard {
         let name = name.replace('-', "_");
         Self::ALL.into_iter().find(|guard| guard.name() == name)
     }
+}
+
+/// `engine rehearse <folder> <program> <percent> <log> [-- <args>...]`.
+#[cfg(feature = "developer-timeline")]
+fn rehearse(words: &mut Words, game: &[String]) -> Result<Command, Failure> {
+    let mut next = || words.next().ok_or_else(|| usage("engine rehearse takes a folder, a program, a percent and a log."));
+    let (install, program, percent, log) = (next()?, next()?, next()?, next()?);
+    let percent = percent.parse().ok().filter(|p| (1..=100).contains(p)).ok_or_else(|| usage("The percent is 1 to 100."))?;
+    Ok(Command::EngineRehearse { install: install.into(), program: program.into(), percent, log: log.into(), arguments: game.to_vec() })
 }
 
 fn usage(message: impl Into<String>) -> Failure {
@@ -201,6 +216,10 @@ fn command(mut words: Words, game: Vec<String>) -> Result<Command, Failure> {
         "steam" => steam(&mut words)?,
         "engine" => match words.next().as_deref() {
             Some("repair") => Command::EngineRepair,
+            #[cfg(feature = "developer-timeline")]
+            Some("generation") => Command::EngineGeneration,
+            #[cfg(feature = "developer-timeline")]
+            Some("rehearse") => rehearse(&mut words, &game)?,
             _ => return Err(usage("engine takes repair.")),
         },
         "settings" => settings(&mut words)?,
@@ -209,6 +228,8 @@ fn command(mut words: Words, game: Vec<String>) -> Result<Command, Failure> {
     match words.next().as_deref() {
         None => {}
         Some("--") if matches!(command, Command::Play { .. }) => {}
+        #[cfg(feature = "developer-timeline")]
+        Some("--") if matches!(command, Command::EngineRehearse { .. }) => {}
         Some("--") => return Err(usage("Only steam play takes arguments after --.")),
         Some(word) => return Err(usage(format!("{word} is not expected here: see --help."))),
     }

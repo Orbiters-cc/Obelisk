@@ -39,6 +39,10 @@ use std::{
     sync::OnceLock,
 };
 
+/// Another set of engine files, which only a developer's build knows.
+#[cfg(feature = "developer-timeline")]
+pub mod developer;
+
 const MANIFEST: &str = include_str!("../../engine-patch/manifest.json");
 /// The files built in, by the manifest's `source` names.
 const FILES: [(&str, &[u8]); 5] = [
@@ -107,38 +111,47 @@ fn built_in() -> &'static Patch {
     VALUE.get_or_init(|| {
         let manifest: Manifest =
             serde_json::from_str(MANIFEST).expect("checked-in engine patch manifest");
-        let published = manifest
-            .generations
-            .iter()
-            .map(|generation| {
-                manifest
-                    .files
-                    .iter()
-                    .map(|entry| generation.files.get(&entry.path).unwrap_or(&entry.original).clone())
-                    .collect()
-            })
-            .collect();
-        Patch {
-            release: manifest.voile,
-            published,
-            idle: super::live::idle,
-            files: manifest
-                .files
-                .into_iter()
-                .map(|entry| File {
-                    bytes: FILES
-                        .iter()
-                        .find(|(source, _)| *source == entry.source)
-                        .map(|(_, bytes)| *bytes)
-                        .expect("every file the manifest names is built in"),
-                    path: entry.path,
-                    original: entry.original,
-                    patched: entry.patched,
-                    previous: entry.previous,
-                })
-                .collect(),
-        }
+        #[cfg(feature = "developer-timeline")]
+        return developer::patch(manifest);
+        #[cfg(not(feature = "developer-timeline"))]
+        released(manifest)
     })
+}
+
+/// The files and sets of a manifest, as every build has them.
+#[cfg_attr(feature = "developer-timeline", allow(dead_code, reason = "developer.rs has its own"))]
+fn released(manifest: Manifest) -> Patch {
+    let published = manifest
+        .generations
+        .iter()
+        .map(|generation| {
+            manifest
+                .files
+                .iter()
+                .map(|entry| generation.files.get(&entry.path).unwrap_or(&entry.original).clone())
+                .collect()
+        })
+        .collect();
+    Patch {
+        release: manifest.voile,
+        published,
+        idle: super::live::idle,
+        files: manifest
+            .files
+            .into_iter()
+            .map(|entry| File {
+                bytes: FILES
+                    .iter()
+                    .find(|(source, _)| *source == entry.source)
+                    .map(|(_, bytes)| *bytes)
+                    .expect("every file the manifest names is built in"),
+                path: entry.path,
+                original: entry.original,
+                patched: entry.patched,
+                previous: entry.previous,
+            })
+            .collect(),
+    }
 }
 
 /// Which keyboard the games of a Linux engine runtime get, and with it
@@ -1211,7 +1224,9 @@ impl Patch {
             if !file.known(&record.before) {
                 return refuse(format!("the file before, at {}", file.path));
             }
-            if !file.ours(&record.after) {
+            // (a developer's build also puts back files that only the timeline generation changes: Voile's own)
+            let put_back = cfg!(feature = "developer-timeline") && record.after == file.original;
+            if !file.ours(&record.after) && !put_back {
                 return refuse(format!("the file after, at {}", file.path));
             }
         }
@@ -1381,7 +1396,10 @@ pub fn apply(linux: &Path) -> Result<(Keyboard, Pin), Incoherent> {
 
 /// The same for a launch that was admitted before it picked `linux`.
 pub(crate) fn apply_admitted(linux: &Path, admitted: Admitted) -> Result<(Keyboard, Pin), Incoherent> {
-    built_in().prepare(linux, admitted)
+    let prepared = built_in().prepare(linux, admitted);
+    #[cfg(feature = "developer-timeline")]
+    let prepared = prepared.and_then(|held| developer::proven(built_in(), linux).map(|()| held));
+    prepared
 }
 
 /// Whether the file at `path` of the Linux engine `linux` is one of ours to patch: its digest is what proves it.
@@ -1401,6 +1419,16 @@ pub(crate) fn lay_ours(linux: &Path) {
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
+
+    /// For developer.rs's tests.
+    #[cfg(feature = "developer-timeline")]
+    pub(super) fn prepared_for_tests(patch: &Patch, linux: &Path) -> Result<(Keyboard, Pin), Incoherent> {
+        patch.prepared(linux)
+    }
+    #[cfg(feature = "developer-timeline")]
+    pub(super) fn prepared_with_for_tests(patch: &Patch, linux: &Path, faults: Faults) -> Result<Result<(Keyboard, Pin), Incoherent>, Crashed> {
+        patch.prepare_with(linux, Patch::admitted(linux).unwrap(), faults)
+    }
 
     fn sha(bytes: &[u8]) -> String {
         format!("{:x}", Sha256::digest(bytes))
