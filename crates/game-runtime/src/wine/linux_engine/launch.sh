@@ -199,7 +199,8 @@ for _ in $(seq 1 100); do
     sleep 0.05
 done
 
-# The guest's output goes to the log through a bounded writer: a line repeated without end (a renderer that retries
+# The guest's standard error (the log: the supervisor gives the launcher the log as its standard error, its standard
+# output goes nowhere, as before) goes to the log through a bounded writer: a line repeated without end (a renderer that retries
 # after its graphics went for good wrote 420 MB in five minutes, 2.6 million times each of three lines) is kept 200
 # times as it is, then counted: a line saying how many came so far at 1000, 10000, 100000 and every million, and the
 # totals at the end. The lines the frame counters and the incident capture read (Neptune's presents, the window
@@ -224,7 +225,7 @@ export FEXDARWIN_BIND="/opt/wine=$runtime/wine:ro;/home/user=$home;/opt/game=$in
 # Each of the two waits says when it returned (`obelisk-wait:` lines in the game's log), so that a quit that does not
 # finish shows which one it is stuck in.
 "$runtime/engine/fexdarwin-run" --cwd "$cwd" ${guest_env[@]+"${guest_env[@]}"} \
-    /bin/sh -c '/opt/wine/bin/wineserver -p0; /opt/wine/bin/wine "$@"; status=$?; echo "obelisk-wait: wine returned $status at $(date +%H:%M:%S.%N 2>/dev/null)" >&2; /opt/wine/bin/wineserver -w; echo "obelisk-wait: wineserver -w returned at $(date +%H:%M:%S.%N 2>/dev/null)" >&2; exit $status' sh "$@" > >(LC_ALL=C /usr/bin/awk "$log_filter") 2>&1 &
+    /bin/sh -c '/opt/wine/bin/wineserver -p0; /opt/wine/bin/wine "$@"; status=$?; echo "obelisk-wait: wine returned $status at $(date +%H:%M:%S.%N 2>/dev/null)" >&2; /opt/wine/bin/wineserver -w; echo "obelisk-wait: wineserver -w returned at $(date +%H:%M:%S.%N 2>/dev/null)" >&2; exit $status' sh "$@" 2> >(LC_ALL=C /usr/bin/awk "$log_filter" >&2) &
 game=$!
 wait "$game"
 status=$?

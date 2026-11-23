@@ -912,12 +912,13 @@ fn a_flood_of_one_line_is_counted_and_the_counters_lines_pass() {
         r#"#!/bin/sh
 i=0
 while [ $i -lt 30000 ]; do
-  echo "npt: memfd receive failed (attempt $i)"
-  if [ $((i % 5000)) -eq 0 ]; then echo "neptune unixlib wsi (wsd): $i presents (0 shown events), last 60: interval avg 16.0 ms"; fi
+  echo "npt: memfd receive failed (attempt $i)" >&2
+  if [ $((i % 5000)) -eq 0 ]; then echo "neptune unixlib wsi (wsd): $i presents (0 shown events), last 60: interval avg 16.0 ms" >&2; fi
   i=$((i + 1))
 done
 echo "npt: destroying Neptune context" >&2
-echo "an ordinary line"
+echo "an ordinary line" >&2
+echo "the game's standard output"
 "#,
     )
     .unwrap();
@@ -939,7 +940,12 @@ echo "an ordinary line"
         .output()
         .unwrap();
     assert!(output.status.success(), "{:?}", output.status);
-    let log = String::from_utf8_lossy(&output.stdout).into_owned() + &String::from_utf8_lossy(&output.stderr);
+    // The supervisor makes the log the launcher's standard error and discards its standard output: the writer's lines
+    // must reach standard error (the first run on a game lost them all to standard output), and the game's standard
+    // output stays where it went.
+    let log = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(String::from_utf8_lossy(&output.stdout).contains("the game's standard output"));
+    assert!(!log.contains("the game's standard output"));
     let repeated = log.lines().filter(|l| l.starts_with("npt: memfd receive failed")).count();
     assert_eq!(repeated, 200, "the first 200 as they are");
     assert!(log.contains("[obelisk-log: 1000 lines like this so far"), "{log:.2000}");
