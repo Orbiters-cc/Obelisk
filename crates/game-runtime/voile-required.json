@@ -1,0 +1,190 @@
+{
+ "voile": "v26.3.0-27.beta1",
+ "files": [
+  {
+   "path": "bin/wine",
+   "size": 9808,
+   "executable": true
+  },
+  {
+   "path": "bin/wineserver",
+   "size": 679392,
+   "executable": true
+  },
+  {
+   "path": "lib/external/D3DMetal.framework/D3DMetal",
+   "link": "Versions/Current/D3DMetal"
+  },
+  {
+   "path": "lib/external/D3DMetal.framework/Versions/A/D3DMetal",
+   "size": 7578032,
+   "executable": true
+  },
+  {
+   "path": "lib/external/D3DMetal.framework/Versions/Current",
+   "link": "A"
+  },
+  {
+   "path": "lib/external/libd3dshared.dylib",
+   "size": 241888,
+   "executable": true
+  },
+  {
+   "path": "linux/engine/fexdarwin-run",
+   "size": 4131456,
+   "executable": true
+  },
+  {
+   "path": "linux/engine/obelisk-input",
+   "size": 1926368,
+   "executable": true
+  },
+  {
+   "path": "linux/engine/run-with-timeout.sh",
+   "size": 1166,
+   "executable": true
+  },
+  {
+   "path": "linux/engine/wsd",
+   "size": 201872,
+   "executable": true
+  },
+  {
+   "path": "linux/engine/wsdctl",
+   "size": 34032,
+   "executable": true
+  },
+  {
+   "path": "linux/graphics/bin/virgl_test_server",
+   "size": 145024,
+   "executable": true
+  },
+  {
+   "path": "linux/graphics/dxmt-native.framework/Versions/A/dxmt-native",
+   "size": 29519744,
+   "executable": true
+  },
+  {
+   "path": "linux/graphics/dxmt-native.framework/Versions/Current",
+   "link": "A"
+  },
+  {
+   "path": "linux/graphics/dxmt-native.framework/dxmt-native",
+   "link": "Versions/Current/dxmt-native"
+  },
+  {
+   "path": "linux/graphics/lib/libepoxy.0.dylib",
+   "size": 1237824,
+   "executable": true
+  },
+  {
+   "path": "linux/graphics/lib/libvirglrenderer.1.dylib",
+   "size": 2065872,
+   "executable": true
+  },
+  {
+   "path": "linux/graphics/libexec/virgl_render_server",
+   "size": 1634096,
+   "executable": true
+  },
+  {
+   "path": "linux/graphics/x86_64/bin/virgl_test_server",
+   "size": 124528,
+   "executable": true
+  },
+  {
+   "path": "linux/graphics/x86_64/lib/libd3dmetal-native.dylib",
+   "size": 456448,
+   "executable": true
+  },
+  {
+   "path": "linux/graphics/x86_64/lib/libepoxy.0.dylib",
+   "size": 1111216,
+   "executable": true
+  },
+  {
+   "path": "linux/graphics/x86_64/lib/libvirglrenderer.1.dylib",
+   "size": 2114368,
+   "executable": true
+  },
+  {
+   "path": "linux/graphics/x86_64/libexec/virgl_render_server",
+   "size": 1652352,
+   "executable": true
+  },
+  {
+   "path": "linux/guest/steam-hostpid.so",
+   "size": 5088,
+   "executable": true
+  },
+  {
+   "path": "linux/root/usr/bin/dash",
+   "size": 129736,
+   "executable": true
+  },
+  {
+   "path": "linux/steam/linux64/crashhandler.so",
+   "size": 1102480,
+   "executable": false
+  },
+  {
+   "path": "linux/steam/linux64/steamclient.so",
+   "size": 46728928,
+   "executable": false
+  },
+  {
+   "path": "linux/windows/d3d11.dll",
+   "size": 1469440,
+   "executable": true
+  },
+  {
+   "path": "linux/windows/d3d12.dll",
+   "size": 1476608,
+   "executable": true
+  },
+  {
+   "path": "linux/windows/dxgi.dll",
+   "size": 1468416,
+   "executable": true
+  },
+  {
+   "path": "linux/wine/bin/wine",
+   "link": "../lib/wine/x86_64-unix/wine"
+  },
+  {
+   "path": "linux/wine/bin/wineserver",
+   "size": 3497032,
+   "executable": true
+  },
+  {
+   "path": "linux/wine/lib/wine/x86_64-unix/nptunix.so",
+   "size": 21544,
+   "executable": true
+  },
+  {
+   "path": "linux/wine/lib/wine/x86_64-unix/ntdll.so",
+   "size": 707504,
+   "executable": true
+  },
+  {
+   "path": "linux/wine/lib/wine/x86_64-unix/wine",
+   "size": 6800,
+   "executable": true
+  },
+  {
+   "path": "linux/wine/lib/wine/x86_64-unix/wineobelisk.so",
+   "size": 43064,
+   "executable": true
+  },
+  {
+   "path": "linux/wine/lib/wine/x86_64-windows/nptunix.dll",
+   "size": 16384,
+   "executable": false
+  },
+  {
+   "path": "linux/wine/lib/wine/x86_64-windows/ntdll.dll",
+   "size": 942080,
+   "executable": false
+  }
+ ]
+}

@@ -1325,7 +1325,7 @@ dependencies = [
 
 [[package]]
 name = "obelisk-cli"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "game-runtime",
  "obelisk-bridge",

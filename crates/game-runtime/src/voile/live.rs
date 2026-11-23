@@ -1,18 +1,28 @@
 //! Whether anything of a library's engine runs now: what is proven, under the
-//! runtime's exclusive lock, before a file of any runtime of the library is
+//! library's exclusive lock, before a file of any runtime of the library is
 //! replaced, put back or removed. A lock alone does not prove it: a game
-//! outlives a supervisor that died, Rosetta's games hold no pin, and the
-//! builds before 0.1.9 held other locks or none.
+//! outlives a supervisor that died, and the builds before 0.1.11 do not know
+//! that lock.
 //!
-//! Two looks, and either refuses: the library's Game session records (their
-//! supervisor, their game, the helper that becomes it), and every process
-//! that runs a file under the library's runtimes (`fexdarwin-run`, the render
-//! servers, Wine under Rosetta). The window server runs from a copy of its
-//! own, with a launcher the records name. A look that cannot be made refuses
-//! too.
-use crate::supervisor::{Identity, StartingGame, journal, quit::listing};
+//! Two looks: the library's Game session records (their supervisor, their
+//! game, the helper that becomes it), and every process that runs a file under
+//! the library's runtimes (`fexdarwin-run`, the render servers, Wine under
+//! Rosetta) or maps one, as `lsof` tells it. Both only read what the system
+//! tells of processes: no signal, no task port, no attach. The window server
+//! runs from a copy of its own, with a launcher the records name.
+//!
+//! The answer is one of three ([`Census`]): nothing runs, something does, or
+//! it cannot be told, and only the first lets a file change. What cannot be
+//! read whole is never taken for nothing: a command that failed, was killed,
+//! took too long, said anything on its standard error or wrote what does not
+//! read to its end; a session named whose record is missing or unreadable.
+use crate::supervisor::{Identity, StartingGame, journal, quit};
 use serde::{Deserialize, Serialize};
-use std::{path::Path, process::Command};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+    time::Duration,
+};
 
 /// Each storefront's records, beside the runtimes.
 const SESSIONS: [&str; 3] = ["SteamSessions", "EpicSessions", "GOGSessions"];
@@ -37,41 +47,96 @@ impl journal::Entry for Recorded {
     }
 }
 
+/// What the looks found.
+#[derive(Debug, PartialEq, Eq)]
+enum Census {
+    /// Nothing of the library's engine runs.
+    Clear,
+    /// Something does: what.
+    Alive(String),
+    /// It cannot be told: why.
+    Unknown(String),
+}
+
+/// The system's own listings, and how long one may take.
+struct Tools {
+    ps: PathBuf,
+    lsof: PathBuf,
+    timeout: Duration,
+}
+
+impl Tools {
+    fn system() -> Self {
+        Self {
+            ps: "/bin/ps".into(),
+            lsof: "/usr/sbin/lsof".into(),
+            timeout: Duration::from_secs(10),
+        }
+    }
+}
+
 /// Nothing of the engine of the library whose runtimes are in `root` runs.
 /// `Err` tells what does, or why it cannot be told.
 pub(super) fn idle(root: &Path) -> Result<(), String> {
-    let root = root
-        .canonicalize()
-        .map_err(|error| format!("{} cannot be read ({error})", root.display()))?;
-    sessions(&root)?;
-    processes(&root)
+    match census(root, &Tools::system()) {
+        Census::Clear => Ok(()),
+        Census::Alive(what) | Census::Unknown(what) => Err(what),
+    }
 }
 
-fn sessions(root: &Path) -> Result<(), String> {
-    let library = root.parent().ok_or("the runtimes are in no library")?;
+fn census(root: &Path, tools: &Tools) -> Census {
+    let root = match root.canonicalize() {
+        Ok(root) => root,
+        Err(error) => return Census::Unknown(format!("{} cannot be read ({error})", root.display())),
+    };
+    match sessions(&root, tools) {
+        Census::Clear => processes(&root, tools),
+        found => found,
+    }
+}
+
+fn sessions(root: &Path, tools: &Tools) -> Census {
+    let Some(library) = root.parent() else {
+        return Census::Unknown("the runtimes are in no library".into());
+    };
     let mut recorded = Vec::new();
     for folder in SESSIONS {
-        let record = journal::current::<Recorded>(&library.join(folder))
-            .map_err(|error| format!("the Game session recorded in {folder} cannot be read ({error})"))?;
-        let Some(record) = record else { continue };
+        let record = match journal::named::<Recorded>(&library.join(folder)) {
+            Ok(Some(record)) => record,
+            Ok(None) => continue,
+            Err(error) => {
+                return Census::Unknown(format!("the Game session recorded in {folder} cannot be read ({error})"));
+            }
+        };
         let starting = record.starting.map(|StartingGame::Process { identity, .. }| identity);
         recorded.extend([Some(record.supervisor), record.game, starting].into_iter().flatten());
     }
     if recorded.is_empty() {
-        return Ok(());
+        return Census::Clear;
     }
     let pids: Vec<_> = recorded.iter().map(|identity| identity.pid.to_string()).collect();
-    let mut command = Command::new("/bin/ps");
-    // (a list none of whose processes is there prints nothing)
+    let mut command = Command::new(&tools.ps);
     command.args(["-o", "pid=,uid=,lstart=", "-p", &pids.join(",")]);
-    let told = listing(command).ok_or("the recorded processes cannot be listed")?;
-    for line in told.lines().filter(|line| !line.trim().is_empty()) {
-        let (pid, uid, born) = born(line).ok_or_else(|| format!("the process list reads {line:?}"))?;
+    let told = match quit::answer(command, tools.timeout) {
+        quit::Answer::Listed(told) => told,
+        // None of them is there.
+        quit::Answer::Nothing => return Census::Clear,
+        quit::Answer::Failed(why) => {
+            return Census::Unknown(format!("the recorded processes cannot be listed: {why}"));
+        }
+    };
+    if !told.ends_with('\n') {
+        return Census::Unknown("the list of the recorded processes is not whole".into());
+    }
+    for line in told.lines() {
+        let Some((pid, uid, born)) = born(line) else {
+            return Census::Unknown(format!("the process list reads {line:?}"));
+        };
         if recorded.iter().any(|known| (known.pid, known.uid, known.birth_seconds) == (pid, uid, born)) {
-            return Err(format!("a Game session of this library runs (process {pid})"));
+            return Census::Alive(format!("a Game session of this library runs (process {pid})"));
         }
     }
-    Ok(())
+    Census::Clear
 }
 
 /// The process, the user and the birth (seconds since 1970) of a line of
@@ -95,23 +160,52 @@ fn born(line: &str) -> Option<(u32, u32, u64)> {
     Some((pid.parse().ok()?, uid.parse().ok()?, ((days * 24 + hour) * 60 + minute) * 60 + second))
 }
 
-fn processes(root: &Path) -> Result<(), String> {
+fn processes(root: &Path, tools: &Tools) -> Census {
     // lsof writes a name's control characters, and a backslash, in its own way.
     let plain = root.to_str().is_some_and(|path| !path.contains(|c: char| c.is_control() || c == '\\'));
     if !plain {
-        return Err(format!("the processes running from {} cannot be told", root.display()));
+        return Census::Unknown(format!("the processes running from {} cannot be told", root.display()));
     }
-    let mut command = Command::new("/usr/sbin/lsof");
+    let mut command = Command::new(&tools.lsof);
     command.args(["-n", "-P", "-w", "-d", "txt", "-Fpn"]);
+    let listed = match quit::answer(command, tools.timeout) {
+        quit::Answer::Listed(listed) => listed,
+        // This very process is there to be listed.
+        quit::Answer::Nothing => return Census::Unknown("the running processes cannot be listed: none was".into()),
+        quit::Answer::Failed(why) => {
+            return Census::Unknown(format!("the running processes cannot be listed: {why}"));
+        }
+    };
+    let Some(files) = mapped(&listed) else {
+        return Census::Unknown("the list of the running processes is not whole".into());
+    };
     let own = std::process::id();
-    // A listing that leaves this very process out lists nothing.
-    let listed = listing(command)
-        .filter(|listing| listing.lines().any(|line| line.strip_prefix('p') == Some(&own.to_string())))
-        .ok_or("the running processes cannot be listed")?;
-    match crate::wine::running_from(&listed, root, own).first() {
-        Some(pid) => Err(format!("a program of this library's engine runs (process {pid})")),
-        None => Ok(()),
+    if !files.iter().any(|(pid, _)| *pid == own) {
+        return Census::Unknown("the list of the running processes leaves this one out".into());
     }
+    match files.iter().find(|(pid, path)| *pid != own && Path::new(path).starts_with(root)) {
+        Some((pid, path)) => Census::Alive(format!("process {pid} runs {path}")),
+        None => Census::Clear,
+    }
+}
+
+/// The processes of an `lsof -Fpn` listing with each file they run or map;
+/// `None` for one that is not whole, or not such a listing.
+fn mapped(listing: &str) -> Option<Vec<(u32, &str)>> {
+    if !listing.ends_with('\n') {
+        return None;
+    }
+    let mut pid = None;
+    let mut files = Vec::new();
+    for line in listing.lines() {
+        match line.as_bytes().first()? {
+            b'p' => pid = Some(line[1..].parse().ok()?),
+            b'f' if line == "ftxt" && pid.is_some() => {}
+            b'n' => files.push((pid?, &line[1..])),
+            _ => return None,
+        }
+    }
+    Some(files)
 }
 
 #[cfg(test)]
@@ -122,6 +216,7 @@ pub(crate) mod tests {
         os::unix::fs::{MetadataExt, PermissionsExt},
         path::PathBuf,
         process::{Child, Stdio},
+        time::Instant,
     };
 
     /// A process running the program at `path`, put there: a copy of this
@@ -147,7 +242,7 @@ pub(crate) mod tests {
         pub(crate) fn identity(&self) -> Identity {
             let mut command = Command::new("/bin/ps");
             command.args(["-o", "pid=,uid=,lstart=", "-p", &self.0.id().to_string()]);
-            let told = listing(command).unwrap();
+            let told = quit::listing(command).unwrap();
             let (pid, uid, birth_seconds) = born(told.trim()).unwrap();
             Identity { pid, uid, birth_seconds, birth_microseconds: 1, executable: "/fixture/launcher".into() }
         }
@@ -298,5 +393,100 @@ pub(crate) mod tests {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         }
         assert!(idle(&root).unwrap_err().contains("Game session"));
+    }
+
+    /// A command that answers as `script` does, in place of the system's.
+    fn fake(folder: &Path, name: &str, script: &str) -> PathBuf {
+        let path = folder.join(name);
+        fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// Seventh verification, blocker 1 (the verifier's listing fixture): a
+    /// listing that failed, or is not whole, is never "nothing runs"; one that
+    /// found nothing, as the command says it, is.
+    #[test]
+    fn a_listing_that_failed_is_not_nothing() {
+        let (library, root) = library();
+        let fakes = tempfile::tempdir().unwrap();
+        record(library.path(), SESSIONS[0], gone(), None);
+        let own = std::process::id();
+        let whole = format!("printf 'p{own}\\nftxt\\nn/bin/sh\\np1\\nftxt\\nn/sbin/launchd\\n'");
+        let mut tools = Tools::system();
+        let mut look = |ps: Option<&str>, lsof: Option<&str>| {
+            tools.ps = ps.map_or("/bin/ps".into(), |script| fake(fakes.path(), "ps", script));
+            tools.lsof = lsof.map_or("/usr/sbin/lsof".into(), |script| fake(fakes.path(), "lsof", script));
+            census(&root, &tools)
+        };
+        assert_eq!(look(None, None), Census::Clear, "the system's own");
+        // `ps` found none of the processes: status 1, not a word.
+        assert_eq!(look(Some("exit 1"), Some(&whole)), Census::Clear);
+        for failed in [
+            "exit 17",
+            "printf 'partial fixture output'; exit 17",
+            "printf '  1     0 Thu Jan  1 00:00:00 1970\\n'; exit 1",
+            "echo 'ps: no such thing' >&2; exit 1",
+            "echo 'ps: something is wrong' >&2; exit 0",
+            "printf '  1     0 Thu Jan  1 00:00'",
+            "printf '  1     0 Thu Jan  1 00:00:00 1970'",
+            "printf 'what is this\\n'",
+            "kill -KILL $$",
+            "kill -TERM $$",
+        ] {
+            assert!(matches!(look(Some(failed), Some(&whole)), Census::Unknown(_)), "ps: {failed}");
+        }
+        for failed in [
+            // "nothing found" leaves out this very process: no listing at all.
+            "exit 1".to_owned(),
+            "exit 0".to_owned(),
+            "exit 17".to_owned(),
+            // The verifier's: one that names this process, and failed.
+            format!("{whole}; exit 17"),
+            format!("{whole}; exit 1"),
+            format!("{whole}; echo 'lsof: cannot read the rest' >&2"),
+            format!("{whole}; kill -KILL $$"),
+            format!("{whole}; printf 'p2\\nftxt\\nn/Vol'"),
+            format!("{whole}; printf 'p2x\\n'"),
+            format!("{whole}; printf 'what is this\\n'"),
+            format!("printf 'n/no/process\\n'; {whole}"),
+            "printf 'p1\\nftxt\\nn/sbin/launchd\\n'".to_owned(),
+        ] {
+            assert!(matches!(look(None, Some(&failed)), Census::Unknown(_)), "lsof: {failed}");
+        }
+        assert_eq!(look(None, Some(&whole)), Census::Clear);
+        let runs = format!("{whole}; printf 'p77\\nftxt\\nn{}/v9.0.0-1/linux/engine/fexdarwin-run\\n'", root.canonicalize().unwrap().display());
+        match look(None, Some(&runs)) {
+            Census::Alive(what) => assert!(what.contains("77") && what.contains("fexdarwin-run"), "{what}"),
+            found => panic!("{found:?}"),
+        }
+        // Neither can be run; neither ends.
+        for (ps, lsof) in [("/bin/ps", "/missing"), ("/missing", "/usr/sbin/lsof")] {
+            let tools = Tools { ps: ps.into(), lsof: lsof.into(), ..Tools::system() };
+            assert!(matches!(census(&root, &tools), Census::Unknown(_)));
+        }
+        let slow = fake(fakes.path(), "slow", "exec /bin/sleep 30");
+        let begun = Instant::now();
+        let tools = Tools { lsof: slow, timeout: Duration::from_millis(300), ..Tools::system() };
+        assert!(matches!(census(&root, &tools), Census::Unknown(_)));
+        assert!(begun.elapsed() < Duration::from_secs(10));
+    }
+
+    /// Blocker 1: a session that is named and whose record is gone is not no
+    /// session.
+    #[test]
+    fn a_named_session_without_its_record_is_not_none() {
+        for folder in SESSIONS {
+            let (library, root) = library();
+            record(library.path(), folder, gone(), None);
+            idle(&root).unwrap();
+            let sessions = library.path().join(folder);
+            for entry in fs::read_dir(&sessions).unwrap().flatten() {
+                if entry.file_name() != "session.v2.json" {
+                    fs::remove_file(entry.path()).unwrap();
+                }
+            }
+            assert!(idle(&root).unwrap_err().contains(folder), "{folder}");
+        }
     }
 }

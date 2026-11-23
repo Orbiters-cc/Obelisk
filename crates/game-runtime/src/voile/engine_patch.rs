@@ -18,12 +18,16 @@
 //! Any other release, or a development runtime, is left as it is, and its
 //! games run as Voile ships them.
 //!
-//! Files change as one recorded transaction and never under a running game:
-//! [`Pin`] keeps every other process of this build away at once, and what
-//! proves that none runs is a look at the library's Game sessions and at the
-//! processes running its files (`live.rs`), under the exclusive lock. The
-//! locks live beside the runtimes' folder ([`Locks`]), outside every folder
-//! an install replaces, and the installer takes the same ones ([`Replacing`]).
+//! Files change as one recorded transaction and never under a running game.
+//! One lock file for the whole library ([`Admitted`]) keeps every launch and
+//! every change apart: a launch on either engine holds it shared from before
+//! it picks a runtime to its game's exit ([`Pin`]), and whatever changes a
+//! runtime holds it alone ([`Alone`]) from before it proves that nothing of
+//! the library's engine runs, by a look at the Game sessions and at the
+//! processes running its files (`live.rs`), to its last check. The locks live
+//! beside the runtimes' folder, outside every folder an install replaces. The
+//! two locks of one release ([`Locks`]) are kept for the builds that know only
+//! them (0.1.9 and 0.1.10, and those before, inside the runtime).
 use serde::{Deserialize, Serialize};
 use std::{
     cell::OnceCell,
@@ -199,6 +203,15 @@ impl Action {
     }
 }
 
+/// What ends a refusal that needs no repair.
+fn advice(action: Action) -> &'static str {
+    match action {
+        Action::Repair => "reinstall Voile's release (obelisk-cli engine repair)",
+        Action::QuitGame => "quit the game that runs on them, then start again",
+        Action::CheckStorage => "the library's folder must be writable and its disk must take locks",
+    }
+}
+
 /// The engine files are in a state no game may start on, and this program cannot repair it alone: the
 /// paths, what is wrong and what the player (or the app) can do. Nothing was changed by the refusal.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -211,14 +224,14 @@ pub struct Incoherent {
 }
 
 impl Incoherent {
-    /// What a Linux engine `runtime` cannot start without is gone from it.
+    /// What a game cannot start without in `runtime` is gone from it, or not as its release ships it.
     pub(crate) fn missing(runtime: &Path, paths: Vec<String>) -> Self {
         let release = crate::voile::release_of(runtime);
         let release = release.as_deref().unwrap_or("in place");
         Self {
             paths,
             reason: format!(
-                "an engine file is missing. No game starts on these engine files until this is resolved: reinstall Voile's release {release} (obelisk-cli engine repair)"
+                "an engine file is missing or damaged. No game starts on these engine files until this is resolved: reinstall Voile's release {release} (obelisk-cli engine repair)"
             ),
             action: Action::Repair,
         }
@@ -278,15 +291,123 @@ fn locks_folder(root: &Path) -> io::Result<PathBuf> {
     Ok(locks_folder_named(root.parent().ok_or(io::ErrorKind::InvalidInput)?, name))
 }
 
+/// The same, made when it is not there.
+fn open_locks_folder(root: &Path) -> io::Result<PathBuf> {
+    let folder = locks_folder(root)?;
+    fs::create_dir_all(&folder)?;
+    Ok(folder)
+}
+
+/// The one lock of a whole library, in its locks' folder: what is in there
+/// nothing ever replaces.
+const LIBRARY_LOCK: &str = "library.lock";
+
+fn library_lock(root: &Path) -> io::Result<PathBuf> {
+    Ok(open_locks_folder(root)?.join(LIBRARY_LOCK))
+}
+
+/// A launch admitted to the library whose runtimes are in `root`: it holds
+/// the library's lock, alone when no other launch, game or change did, else
+/// shared, which waits for a change under way.
+#[derive(Debug)]
+pub struct Admitted {
+    file: fs::File,
+    alone: bool,
+}
+
+impl Admitted {
+    pub(crate) fn take(root: &Path) -> io::Result<Self> {
+        let file = open_lock(&library_lock(root)?)?;
+        let mut held_alone = alone(&file)?;
+        if !held_alone {
+            // Whoever changes the runtimes is waited for; then it may be alone.
+            file.lock_shared()?;
+            file.unlock()?;
+            held_alone = alone(&file)?;
+            if !held_alone {
+                file.lock_shared()?;
+            }
+        }
+        Ok(Self { file, alone: held_alone })
+    }
+
+    /// As `take`, or why no launch can be.
+    pub(crate) fn launch(root: &Path) -> Result<Self, Incoherent> {
+        Self::take(root).map_err(|error| Incoherent {
+            paths: vec![root.display().to_string()],
+            reason: format!(
+                "the library's lock cannot be held ({error}). No game starts on these engine files until this is resolved: {}",
+                advice(Action::CheckStorage)
+            ),
+            action: Action::CheckStorage,
+        })
+    }
+
+    /// The lock shared with whoever else launches, as the launch's pin, with
+    /// no runtime's own.
+    pub(crate) fn pin(self) -> io::Result<Pin> {
+        self.file.lock_shared()?;
+        Ok(Pin { library: self.file, _runtime: None, _legacy: None })
+    }
+}
+
+/// The library's lock, held alone: no launch is admitted and no game of one
+/// admitted runs.
+#[derive(Debug)]
+pub(crate) struct Alone {
+    _library: fs::File,
+    root: PathBuf,
+}
+
+impl Alone {
+    /// `None` while a launch, a game or another change holds it.
+    pub(crate) fn hold(root: &Path) -> io::Result<Option<Self>> {
+        let file = open_lock(&library_lock(root)?)?;
+        Ok(alone(&file)?.then(|| Self { _library: file, root: root.to_owned() }))
+    }
+
+    /// Whether nothing of the library's engine is proven to run, told when so.
+    pub(crate) fn idle(&self) -> bool {
+        let running = super::live::idle(&self.root).err();
+        if let Some(running) = &running {
+            eprintln!("engine: the runtimes of {} are left as they are: {running}", self.root.display());
+        }
+        running.is_none()
+    }
+
+    /// Holds `runtime` too, as the builds before 0.1.11 do.
+    pub(crate) fn release(&self, runtime: &Path) -> io::Result<Option<Release>> {
+        let locks = Locks::of_runtime(runtime)?;
+        let writer = locks.writer()?;
+        let sessions = locks.sessions()?;
+        if !alone(&sessions)? {
+            return Ok(None);
+        }
+        let legacy = locks.legacy_sessions()?;
+        if let Some(legacy) = &legacy
+            && !alone(legacy)?
+        {
+            return Ok(None);
+        }
+        Ok(Some(Release { _writer: writer, _sessions: sessions, _legacy: legacy }))
+    }
+}
+
+/// A runtime folder held against the builds before 0.1.11.
+#[derive(Debug)]
+pub(crate) struct Release {
+    _writer: Writer,
+    _sessions: fs::File,
+    _legacy: Option<fs::File>,
+}
+
 impl Locks {
     /// Of the runtime folder `runtime`, which may not exist yet.
     fn of_runtime(runtime: &Path) -> io::Result<Self> {
         let root = runtime.parent().ok_or(io::ErrorKind::InvalidInput)?;
         let name = runtime.file_name().ok_or(io::ErrorKind::InvalidInput)?;
-        let folder = locks_folder(root)?;
-        fs::create_dir_all(&folder)?;
         Ok(Self {
-            folder,
+            folder: open_locks_folder(root)?,
             name: name.to_string_lossy().into_owned(),
             linux: runtime.join(super::LINUX),
         })
@@ -349,14 +470,16 @@ fn alone(file: &fs::File) -> io::Result<bool> {
     }
 }
 
-/// A runtime generation held: while any process holds it no engine file of the runtime changes (an update, a
-/// repair or a removal needs every holder gone). One per launch: taken by its preparation with the files proven
-/// complete under the same lock, carried by the launch's own request, let go by whatever ends that launch (a
-/// failure, a cancellation), and inherited by the session's supervisor as the same open lock, which it keeps
-/// until the game has exited: there is no moment without it, whoever dies.
+/// A library's runtimes held: while any process holds it no engine file of any of them changes (an update, a
+/// repair or a removal needs every holder gone). One per launch: taken before its runtime is picked, carried by the
+/// launch's own request, let go by whatever ends that launch (a failure, a cancellation), and inherited by the
+/// session's supervisor as the same open lock, which it keeps until the game has exited: there is no moment without
+/// it, whoever dies. On the Linux engine, whose files change, it holds the runtime's own lock too, for the builds
+/// that know only that one.
 #[derive(Debug)]
 pub struct Pin {
-    file: fs::File,
+    library: fs::File,
+    _runtime: Option<fs::File>,
     _legacy: Option<fs::File>,
 }
 
@@ -364,91 +487,92 @@ impl Pin {
     /// The held lock as a process's standard output: how a supervisor inherits it, and what drains its game's
     /// output once it is gone (`game_log`).
     pub(crate) fn stdio(&self) -> io::Result<std::process::Stdio> {
-        Ok(self.file.try_clone()?.into())
+        Ok(self.library.try_clone()?.into())
     }
 
-    /// The pin of `linux` this process was started with, as its standard output, which is nowhere from then on.
-    pub(crate) fn inherited(linux: &Path) -> io::Result<Self> {
+    /// The pin of a launch in `runtime` this process was started with, as its standard output, which is nowhere from
+    /// then on.
+    pub(crate) fn inherited(runtime: &Path, engine: crate::wine::Engine) -> io::Result<Self> {
         use std::os::fd::AsFd;
         let file = fs::File::from(io::stdout().as_fd().try_clone_to_owned()?);
-        let pin = Self::adopt(linux, file)?;
+        let pin = match engine {
+            crate::wine::Engine::Linux => Self::adopt(runtime, file)?,
+            crate::wine::Engine::Rosetta => Self::adopt_library(runtime.parent().ok_or(io::ErrorKind::InvalidInput)?, file)?,
+        };
         let nowhere = fs::OpenOptions::new().write(true).open("/dev/null")?;
         rustix::stdio::dup2_stdout(&nowhere)?;
         Ok(pin)
     }
 
-    /// `file` as the pin of `linux`: it is that runtime's own lock file, and its lock is held by it.
+    /// `file` as the pin of the Linux engine `linux`.
     fn adopt(linux: &Path, file: fs::File) -> io::Result<Self> {
+        let root = linux.parent().and_then(Path::parent).ok_or(io::ErrorKind::InvalidInput)?;
+        let pin = Self::adopt_library(root, file)?;
         let locks = Locks::of(linux)?;
-        let (given, expected) = (file.metadata()?, fs::symlink_metadata(locks.sessions_path())?);
+        let runtime = locks.sessions()?;
+        held_shared(&runtime)?;
+        let legacy = locks.legacy_sessions()?.filter(|file| file.try_lock_shared().is_ok());
+        Ok(Self { _runtime: Some(runtime), _legacy: legacy, ..pin })
+    }
+
+    /// `file` as the pin of the library whose runtimes are in `root`: it is that library's own lock file, and its
+    /// lock is held by it.
+    fn adopt_library(root: &Path, file: fs::File) -> io::Result<Self> {
+        let (given, expected) = (file.metadata()?, fs::symlink_metadata(library_lock(root)?)?);
         if !expected.is_file() || (given.dev(), given.ino()) != (expected.dev(), expected.ino()) {
-            return Err(io::Error::other("not the runtime's lock"));
+            return Err(io::Error::other("not the library's lock"));
         }
         // Held already by what this process inherited: this takes nothing new, and fails when it was not.
-        file.try_lock_shared().map_err(|error| match error {
-            fs::TryLockError::Error(error) => error,
-            fs::TryLockError::WouldBlock => io::Error::other("the runtime's lock is not held"),
-        })?;
-        let legacy = locks.legacy_sessions()?.filter(|file| file.try_lock_shared().is_ok());
-        Ok(Self { file, _legacy: legacy })
+        held_shared(&file)?;
+        Ok(Self { library: file, _runtime: None, _legacy: None })
     }
 
     /// A pin of `linux`: waits for an update in progress (a few seconds at most).
     #[cfg(test)]
     pub(crate) fn hold(linux: &Path) -> io::Result<Self> {
-        let locks = Locks::of(linux)?;
-        let file = locks.sessions()?;
-        file.lock_shared()?;
-        Ok(Self { file, _legacy: None })
+        let root = linux.parent().and_then(Path::parent).ok_or(io::ErrorKind::InvalidInput)?;
+        let pin = Admitted::take(root)?.pin()?;
+        let runtime = Locks::of(linux)?.sessions()?;
+        runtime.lock_shared()?;
+        Ok(Self { _runtime: Some(runtime), ..pin })
     }
 }
 
-/// A runtime folder nobody else changes, held while one is put there, replaced or removed.
+/// `file`'s lock, shared: at once, or not at all.
+fn held_shared(file: &fs::File) -> io::Result<()> {
+    file.try_lock_shared().map_err(|error| match error {
+        fs::TryLockError::Error(error) => error,
+        fs::TryLockError::WouldBlock => io::Error::other("the lock is not held"),
+    })
+}
+
+/// A runtime folder nobody else starts in or changes, held while one is put there, replaced or removed.
 #[derive(Debug)]
 pub(crate) struct Replacing {
-    _writer: Writer,
-    _sessions: fs::File,
-    _legacy: Option<fs::File>,
+    _library: Alone,
+    _release: Release,
 }
 
 impl Replacing {
     /// Holds `runtime` (`<voile>/<release>`) to replace or remove what is there; `None` while a game's session
-    /// holds it, anything of its library's engine runs, or that cannot be told.
+    /// holds the library, anything of its engine runs, or that cannot be told.
     pub(crate) fn hold(runtime: &Path) -> io::Result<Option<Self>> {
-        let Some(held) = Self::free(runtime)? else {
-            return Ok(None);
-        };
-        let root = runtime.parent().ok_or(io::ErrorKind::InvalidInput)?;
-        if let Err(running) = super::live::idle(root) {
-            eprintln!("engine: {} is left as it is: {running}", runtime.display());
-            return Ok(None);
-        }
-        Ok(Some(held))
+        Ok(Self::free(runtime)?.filter(|held| held._library.idle()))
     }
 
-    /// Holds `runtime`, where nothing is yet; `None` while a launch holds it.
+    /// Holds `runtime`, where nothing is yet; `None` while a launch or a game holds the library.
     pub(crate) fn free(runtime: &Path) -> io::Result<Option<Self>> {
-        let locks = Locks::of_runtime(runtime)?;
-        let writer = locks.writer()?;
-        let sessions = locks.sessions()?;
-        if !alone(&sessions)? {
+        let Some(library) = Alone::hold(runtime.parent().ok_or(io::ErrorKind::InvalidInput)?)? else {
             return Ok(None);
-        }
-        let legacy = locks.legacy_sessions()?;
-        if let Some(legacy) = &legacy
-            && !alone(legacy)?
-        {
-            return Ok(None);
-        }
-        Ok(Some(Self { _writer: writer, _sessions: sessions, _legacy: legacy }))
+        };
+        let release = library.release(runtime)?;
+        Ok(release.map(|release| Self { _library: library, _release: release }))
     }
 }
 
 /// Held by the one process that installs into `root`: two never remove each other's unfinished work.
 pub(crate) fn installing(root: &Path) -> io::Result<Option<fs::File>> {
-    let folder = locks_folder(root)?;
-    fs::create_dir_all(&folder)?;
-    let file = open_lock(&folder.join("install.lock"))?;
+    let file = open_lock(&open_locks_folder(root)?.join("install.lock"))?;
     Ok(alone(&file)?.then_some(file))
 }
 
@@ -670,8 +794,7 @@ impl Patch {
     fn refuse(&self, paths: Vec<String>, problem: &str, action: Action) -> Incoherent {
         let advice = match action {
             Action::Repair => format!("reinstall Voile's release {} (obelisk-cli engine repair)", self.release),
-            Action::QuitGame => "quit the game that runs on them, then start again".to_owned(),
-            Action::CheckStorage => "the library's folder must be writable and its disk must take locks".to_owned(),
+            action => advice(action).to_owned(),
         };
         Incoherent {
             paths,
@@ -681,18 +804,23 @@ impl Patch {
     }
 
     /// Our files over the release's own (or an earlier obelisk-cli's) in `linux`, all of them or none, when
-    /// every one is the release's or ours and no session is running on the runtime; returns the keyboard
-    /// the launch gets and a pin that keeps the runtime's files as they are until it is dropped. `Err` when
+    /// every one is the release's or ours and no session is running in the library; returns the keyboard
+    /// the launch gets and a pin that keeps the runtimes' files as they are until it is dropped. `Err` when
     /// the files are not one complete set this program can start on or repair (nothing is changed then), or
     /// when they cannot be pinned.
-    fn prepare(&self, linux: &Path) -> Result<(Keyboard, Pin), Incoherent> {
-        match self.prepare_with(linux, Faults::default()) {
+    fn prepare(&self, linux: &Path, admitted: Admitted) -> Result<(Keyboard, Pin), Incoherent> {
+        match self.prepare_with(linux, admitted, Faults::default()) {
             Ok(done) => done,
             Err(Crashed) => unreachable!("no fault was injected"),
         }
     }
 
-    fn prepare_with(&self, linux: &Path, faults: Faults) -> Result<Result<(Keyboard, Pin), Incoherent>, Crashed> {
+    fn prepare_with(
+        &self,
+        linux: &Path,
+        admitted: Admitted,
+        faults: Faults,
+    ) -> Result<Result<(Keyboard, Pin), Incoherent>, Crashed> {
         let unlocked = |error: io::Error| {
             self.refuse(
                 vec![linux.display().to_string()],
@@ -715,13 +843,14 @@ impl Patch {
             Err(error) => return Ok(Err(unlocked(error))),
         };
         let exclusive = match alone(&sessions) {
-            Ok(alone_here) => alone_here && legacy.as_ref().is_none_or(|legacy| alone(legacy).unwrap_or(false)),
+            Ok(alone_here) => admitted.alone && alone_here && legacy.as_ref().is_none_or(|legacy| alone(legacy).unwrap_or(false)),
             Err(error) => return Ok(Err(unlocked(error))),
         };
         let done = self.under_locks(linux, exclusive, faults)?;
-        // Hand over from the writer's lock to the session's: no update can come between (we still hold the
-        // writer lock, which every writer and the installer need).
+        // Hand over from the writer's locks to the session's: no update can come between (we still hold the
+        // release's writer lock, which every writer and the installer need).
         Ok(done.and_then(|keyboard| {
+            admitted.file.lock_shared().map_err(unlocked)?;
             let _ = sessions.unlock();
             sessions.lock_shared().map_err(unlocked)?;
             // An older build changes only files it knows, and waits on its own lock alone: where it would find some
@@ -737,7 +866,7 @@ impl Patch {
                     self.complete(linux)?;
                 }
             }
-            Ok((keyboard, Pin { file: sessions, _legacy: legacy }))
+            Ok((keyboard, Pin { library: admitted.file, _runtime: Some(sessions), _legacy: legacy }))
         }))
     }
 
@@ -770,7 +899,7 @@ impl Patch {
         Ok(Some(journal))
     }
 
-    /// `alone`: no session's lock is held by anyone else.
+    /// `alone`: the library's lock is ours alone, and no session of an earlier build holds the runtime's.
     fn under_locks(&self, linux: &Path, alone: bool, faults: Faults) -> Result<Result<Keyboard, Incoherent>, Crashed> {
         // The files change only once nothing of the library's engine is proven to run, looked at once and only when
         // something is to change: a launch on files that need nothing waits for nothing.
@@ -1247,7 +1376,25 @@ pub(crate) fn release() -> &'static str {
 /// the files are not one complete set a game may start on, or cannot be pinned: the refusal names the paths
 /// and what to do.
 pub fn apply(linux: &Path) -> Result<(Keyboard, Pin), Incoherent> {
-    built_in().prepare(linux)
+    apply_admitted(linux, Admitted::launch(linux.parent().and_then(Path::parent).unwrap_or(linux))?)
+}
+
+/// The same for a launch that was admitted before it picked `linux`.
+pub(crate) fn apply_admitted(linux: &Path, admitted: Admitted) -> Result<(Keyboard, Pin), Incoherent> {
+    built_in().prepare(linux, admitted)
+}
+
+/// Whether the file at `path` of the Linux engine `linux` is one of ours to patch: its digest is what proves it.
+pub(crate) fn proven(path: &str) -> bool {
+    built_in().files.iter().any(|file| file.path == path)
+}
+
+/// Puts this build's own engine files in `linux`, each with the mode of the one it replaces.
+#[cfg(test)]
+pub(crate) fn lay_ours(linux: &Path) {
+    for file in &built_in().files {
+        fs::write(linux.join(&file.path), file.bytes).unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -1261,16 +1408,22 @@ mod tests {
 
     impl Patch {
         fn apply(&self, linux: &Path) -> Result<Keyboard, Incoherent> {
-            self.prepare(linux).map(|(keyboard, _)| keyboard)
+            self.prepared(linux).map(|(keyboard, _)| keyboard)
+        }
+        fn prepared(&self, linux: &Path) -> Result<(Keyboard, Pin), Incoherent> {
+            self.prepare(linux, Self::admitted(linux)?)
+        }
+        fn admitted(linux: &Path) -> Result<Admitted, Incoherent> {
+            Admitted::launch(linux.parent().unwrap().parent().unwrap())
         }
         fn with(&self, linux: &Path, faults: Faults) -> Result<Keyboard, Incoherent> {
-            match self.prepare_with(linux, faults) {
+            match self.prepare_with(linux, Self::admitted(linux)?, faults) {
                 Ok(done) => done.map(|(keyboard, _)| keyboard),
                 Err(Crashed) => panic!("crashed"),
             }
         }
         fn crash(&self, linux: &Path, faults: Faults) {
-            assert!(self.prepare_with(linux, faults).is_err(), "{faults:?} was to crash");
+            assert!(self.prepare_with(linux, Self::admitted(linux).unwrap(), faults).is_err(), "{faults:?} was to crash");
         }
     }
 
@@ -1641,7 +1794,7 @@ mod tests {
             }
             tried += 1;
         }
-        assert!(tried >= 8, "the cli-v0.1.2 to 0.1.9 tags");
+        assert!(tried >= 9, "the cli-v0.1.2 to 0.1.10 tags");
     }
     /// Fourth verification, finding 2: a crash at any point of a transaction is ended at the next launch from
     /// its record alone, and that launch starts on one complete set.
@@ -1795,7 +1948,7 @@ mod tests {
         let session = Pin::hold(&linux).unwrap();
         assert_eq!(patch().apply(&linux).unwrap(), Keyboard::Pending);
         assert_eq!(one_set(&linux), "voile");
-        let (keyboard, second) = patch().prepare(&linux).unwrap();
+        let (keyboard, second) = patch().prepared(&linux).unwrap();
         assert_eq!(keyboard, Keyboard::Pending);
         drop(session);
         assert_eq!(patch().apply(&linux).unwrap(), Keyboard::Pending, "the second launch's pin still holds");
@@ -1808,7 +1961,7 @@ mod tests {
     #[test]
     fn the_preparation_pin_is_held_until_released() {
         let (_root, linux) = runtime(RELEASE);
-        let (keyboard, pin) = patch().prepare(&linux).unwrap();
+        let (keyboard, pin) = patch().prepared(&linux).unwrap();
         assert_eq!(keyboard, Keyboard::Mac);
         let sessions = Locks::of(&linux).unwrap().sessions().unwrap();
         assert!(matches!(sessions.try_lock(), Err(fs::TryLockError::WouldBlock)));
@@ -1956,7 +2109,7 @@ mod tests {
     #[test]
     fn the_locks_are_outside_the_folder_an_install_replaces() {
         let (root, linux) = runtime(RELEASE);
-        let (_, pin) = patch().prepare(&linux).unwrap();
+        let (_, pin) = patch().prepared(&linux).unwrap();
         let release = root.path().join("Voile").join(RELEASE);
         assert!(Replacing::hold(&release).unwrap().is_none(), "a held runtime is not replaced");
         // Whatever took the folder away all the same, the lock is the same one.
@@ -1994,8 +2147,8 @@ mod tests {
     #[test]
     fn an_inherited_pin_is_the_preparation_s_own_lock() {
         let (_root, linux) = runtime(RELEASE);
-        let (_, pin) = patch().prepare(&linux).unwrap();
-        let inherited = Pin::adopt(&linux, pin.file.try_clone().unwrap()).unwrap();
+        let (_, pin) = patch().prepared(&linux).unwrap();
+        let inherited = Pin::adopt(&linux, pin.library.try_clone().unwrap()).unwrap();
         drop(pin);
         let sessions = Locks::of(&linux).unwrap().sessions().unwrap();
         assert!(matches!(sessions.try_lock(), Err(fs::TryLockError::WouldBlock)), "held still");
@@ -2004,8 +2157,8 @@ mod tests {
         drop(sessions);
         // Something else in its place is none: another file, another runtime's lock.
         let (_other, other) = runtime(RELEASE);
-        let (_, foreign) = patch().prepare(&other).unwrap();
-        assert!(Pin::adopt(&linux, foreign.file.try_clone().unwrap()).is_err());
+        let (_, foreign) = patch().prepared(&other).unwrap();
+        assert!(Pin::adopt(&linux, foreign.library.try_clone().unwrap()).is_err());
         assert!(Pin::adopt(&linux, fs::File::open("/dev/null").unwrap()).is_err());
         // Nor is a lock nobody held while a writer has it.
         let writer = Locks::of(&linux).unwrap().sessions().unwrap();
@@ -2105,6 +2258,9 @@ mod tests {
                         assert!(linux.join(JOURNAL).exists(), "{left} {crash:?}: refused without a record");
                     }
                 }
+                // (another test's child may hold the locks for the moment before its exec)
+                free(&open_lock(&library_lock(linux.parent().unwrap().parent().unwrap()).unwrap()).unwrap());
+                free(&Locks::of(&linux).unwrap().sessions().unwrap());
                 assert_eq!(patch().apply(&linux).unwrap(), Keyboard::Mac, "{left} {crash:?}");
                 assert_eq!(one_set(&linux), "ours");
                 no_leftovers(&linux);
@@ -2151,7 +2307,7 @@ mod tests {
     fn the_published_generations_are_of_known_files() {
         let manifest: Manifest = serde_json::from_str(MANIFEST).unwrap();
         let releases: Vec<&str> = manifest.generations.iter().flat_map(|g| g.releases.iter().map(String::as_str)).collect();
-        for release in ["0.1.2", "0.1.3", "0.1.4", "0.1.5", "0.1.6", "0.1.7", "0.1.8", "0.1.9"] {
+        for release in ["0.1.2", "0.1.3", "0.1.4", "0.1.5", "0.1.6", "0.1.7", "0.1.8", "0.1.9", "0.1.10"] {
             assert!(releases.contains(&release), "{release}");
         }
         let patch = built_in();
@@ -2254,12 +2410,12 @@ mod tests {
     fn an_older_build_cannot_write_under_a_pin_it_does_not_know() {
         let (_root, linux) = runtime(RELEASE);
         let session = Pin::hold(&linux).unwrap();
-        let (keyboard, pin) = patch().prepare(&linux).unwrap();
+        let (keyboard, pin) = patch().prepared(&linux).unwrap();
         assert_eq!(keyboard, Keyboard::Pending);
         let legacy = open_lock(&linux.join(LEGACY_SESSIONS)).unwrap();
         assert!(!alone(&legacy).unwrap());
         // The supervisor holds it too.
-        let inherited = Pin::adopt(&linux, pin.file.try_clone().unwrap()).unwrap();
+        let inherited = Pin::adopt(&linux, pin.library.try_clone().unwrap()).unwrap();
         drop((pin, session));
         assert!(!alone(&legacy).unwrap());
         drop(inherited);
@@ -2368,5 +2524,75 @@ mod tests {
         assert_eq!(one_set(&linux), "voile");
         running.end();
         assert_eq!(patch().apply(&linux).unwrap(), Keyboard::Mac);
+    }
+
+    /// Seventh verification, blocker 2: one lock for the whole library. A launch admitted to it, on either engine and
+    /// whichever release, holds every change off from before it picks a runtime to its game's exit; a change holds every
+    /// launch off from before its look to its last check; and two changes are never made at once.
+    #[test]
+    fn a_launch_anywhere_in_the_library_holds_every_change_of_it_off() {
+        let (root, linux) = runtime(RELEASE);
+        let voile = root.path().join("Voile");
+        let (release, other) = (voile.join(RELEASE), voile.join("v1.0.0-9"));
+        let lock = || open_lock(&library_lock(&voile).unwrap()).unwrap();
+        // Admitted, with no runtime picked yet; then pinned without one, as Rosetta's launches are.
+        let admitted = Admitted::take(&voile).unwrap();
+        for held in [&release, &other] {
+            assert!(Replacing::hold(held).unwrap().is_none());
+            assert!(Replacing::free(held).unwrap().is_none());
+        }
+        assert!(Alone::hold(&voile).unwrap().is_none());
+        let pin = admitted.pin().unwrap();
+        assert!(Replacing::hold(&release).unwrap().is_none() && Replacing::free(&other).unwrap().is_none());
+        // Its supervisor is given that very lock, for Rosetta and for the Linux engine.
+        let inherited = Pin::adopt_library(&voile, pin.library.try_clone().unwrap()).unwrap();
+        // Another launch goes beside it, and changes nothing.
+        let (keyboard, second) = patch().prepared(&linux).unwrap();
+        assert_eq!(keyboard, Keyboard::Pending);
+        assert_eq!(one_set(&linux), "voile");
+        drop((pin, second));
+        assert!(Alone::hold(&voile).unwrap().is_none(), "the supervisor's hold is the launch's");
+        drop(inherited);
+        free(&lock());
+        // A lock that is not held, another library's, or no lock, is no pin.
+        let writer = lock();
+        free(&writer);
+        assert!(Pin::adopt_library(&voile, lock()).is_err(), "someone changes the runtimes");
+        drop(writer);
+        let (elsewhere, _) = runtime(RELEASE);
+        let foreign = Admitted::take(&elsewhere.path().join("Voile")).unwrap().pin().unwrap();
+        assert!(Pin::adopt_library(&voile, foreign.library.try_clone().unwrap()).is_err());
+        assert!(Pin::adopt_library(&voile, fs::File::open("/dev/null").unwrap()).is_err());
+        // A change of one release holds off the change of another, and every launch, until it is done.
+        free(&lock());
+        let change = Replacing::free(&other).unwrap().unwrap();
+        assert!(Replacing::hold(&release).unwrap().is_none());
+        let waiting = std::thread::spawn({
+            let linux = linux.clone();
+            move || patch().apply(&linux)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(!waiting.is_finished());
+        assert_eq!(one_set(&linux), "voile");
+        drop(change);
+        assert_eq!(waiting.join().unwrap().unwrap(), Keyboard::Mac);
+        // The lock is outside whatever is replaced, beside the locks of every release.
+        assert_eq!(library_lock(&voile).unwrap().parent().unwrap().file_name().unwrap(), "Voile.locks");
+    }
+
+    /// Blocker 2: the lock goes from the update to the launch it was made for with no moment between, and an update
+    /// made by one launch is never under another.
+    #[test]
+    fn an_updated_library_is_held_by_the_launch_it_was_updated_for() {
+        let (root, linux) = runtime(RELEASE);
+        let voile = root.path().join("Voile");
+        let (keyboard, pin) = patch().prepared(&linux).unwrap();
+        assert_eq!(keyboard, Keyboard::Mac);
+        assert!(Alone::hold(&voile).unwrap().is_none());
+        let beside = Admitted::take(&voile).unwrap();
+        assert!(!beside.alone, "and shared: another launch goes beside it");
+        drop(beside);
+        drop(pin);
+        free(&open_lock(&library_lock(&voile).unwrap()).unwrap());
     }
 }

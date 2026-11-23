@@ -48,6 +48,15 @@ pub(crate) fn current<T: Entry>(root: &Path) -> Result<Option<T>, Error> {
     }
 }
 
+/// As `current`, for whoever must not take a lost record for no session: a
+/// name whose record is missing is an error.
+pub(crate) fn named<T: Entry>(root: &Path) -> Result<Option<T>, Error> {
+    match read::<Current>(&root.join(CURRENT))? {
+        Some(current) => by_id(root, &current.id)?.map(Some).ok_or(Error::InvalidSession),
+        None => Ok(None),
+    }
+}
+
 pub(crate) fn by_id<T: Entry>(root: &Path, id: &str) -> Result<Option<T>, Error> {
     let Some(entry) = read::<T>(&root.join(record_name(id)?))? else {
         return Ok(None);

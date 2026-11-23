@@ -13,7 +13,9 @@ fn ready(config: &Config, root: &Path, prerequisites: &[Prerequisite]) {
     let storefront = Plain {
         prerequisites: prerequisites.to_vec(),
     };
-    prepare(config, &locations(root), &install, &target, &storefront).unwrap();
+    let locations = locations(root);
+    let admitted = crate::wine::tests::admitted(&locations);
+    prepare(config, &locations, &install, &target, &storefront, admitted).unwrap();
 }
 
 #[test]

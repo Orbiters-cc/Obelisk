@@ -425,7 +425,7 @@ impl<P: Provider> Client<P> {
     /// Spawns a supervisor and hands it the launch. `handoff` writes the
     /// storefront's request, including any credentials, to the private pipe;
     /// `acknowledges` checks that the reply describes that launch. `pin`, what
-    /// holds the engine files of a launch on the Linux engine, is its standard
+    /// holds the runtime of a Windows game's launch, is its standard
     /// output: the supervisor holds the same lock from its first instant.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn start_with(

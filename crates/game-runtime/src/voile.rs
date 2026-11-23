@@ -32,8 +32,12 @@ use std::{
 pub mod engine_patch;
 mod feed;
 pub(crate) mod live;
+mod members;
+pub(crate) mod required;
 
 use feed::Offered;
+use members::Members;
+pub(crate) use required::lacking;
 pub(crate) use feed::refresh;
 pub use feed::{take_prereleases, takes_prereleases};
 
@@ -155,16 +159,6 @@ pub fn linux_runtime(root: &Path) -> Option<PathBuf> {
     // left of it; another carries one when its folder is there.
     let carries = version(&release).as_deref() == Some(engine_patch::release());
     (carries || linux.is_dir()).then_some(linux)
-}
-
-/// The files a Linux engine's runtime cannot start without that `runtime`
-/// lacks, by their path in it.
-pub(crate) fn missing(runtime: &Path) -> Vec<String> {
-    ENGINE
-        .iter()
-        .filter(|file| !runtime.join(file).exists())
-        .map(|file| (*file).to_owned())
-        .collect()
 }
 
 /// Whether the runtime Windows games run in is the one install-dev.sh put
@@ -495,14 +489,15 @@ impl Install {
         }
         // Found before the download, checked again as it goes in place.
         let replaces = fs::symlink_metadata(&destination).is_ok();
-        if replaces {
-            let (runtime, folder) = (destination.clone(), root.to_owned());
-            blocking(move || {
+        let (runtime, folder) = (destination.clone(), root.to_owned());
+        blocking(move || {
+            if replaces {
                 engine_patch::Replacing::hold(&runtime)?.ok_or(Failure::InUse)?;
-                exchanges(&folder)
-            })
-            .await?;
-        }
+            }
+            // Nothing is laid on a disk no repair could be made on.
+            exchanges(&folder)
+        })
+        .await?;
         step("before-extract");
         let (extracted, members) = self.extract(root, release, archive).await?;
         step("after-extract");
@@ -511,8 +506,9 @@ impl Install {
             // Held to the end, whoever waits for this.
             let _alone = alone;
             let runtime = extracted.path().join(format!("voile-{release}"));
-            // The complete release, as its archive holds it, or nothing is
-            // replaced: security software may have taken a file meanwhile.
+            // The complete release, as its archive holds it to the byte, or
+            // nothing is replaced: security software may have taken a file
+            // meanwhile, a disk may have cut one short.
             whole(&runtime, &release, &members)?;
             step("after-validation");
             if replaces {
@@ -535,10 +531,15 @@ impl Install {
                 let _held = engine_patch::Replacing::free(&destination)?.ok_or(Failure::InUse)?;
                 renameat_with(CWD, &runtime, CWD, &destination, RenameFlags::NOREPLACE)
                     .map_err(std::io::Error::from)?;
-                whole(&destination, &release, &members)?;
+                if let Err(failure) = whole(&destination, &release, &members) {
+                    renameat_with(CWD, &destination, CWD, &runtime, RenameFlags::NOREPLACE)
+                        .map_err(std::io::Error::from)?;
+                    return Err(failure);
+                }
             }
-            // Nothing an unfinished install left is needed any more.
-            remove_entries(&root, |name| name.starts_with(UNFINISHED));
+            // Nothing an unfinished install of it left is needed any more; a
+            // whole runtime of another release kept there may be.
+            remove_entries(&root, |name| name.starts_with(UNFINISHED) && !saves_another(&root.join(name), &release));
             step("after-cleanup");
             Ok(destination)
         })
@@ -558,14 +559,14 @@ impl Install {
 
     /// Checks `archive` (or downloads it) and extracts it into a folder of
     /// `root` that goes away unless the caller moves what it holds; returns
-    /// it with the name of everything the archive holds. What an unfinished
+    /// it with what the archive holds, member by member. What an unfinished
     /// install left stays: it may hold the only runtime there is.
     async fn extract(
         &self,
         root: &Path,
         expected: &Release,
         archive: Option<&Path>,
-    ) -> Result<(tempfile::TempDir, Vec<PathBuf>), Failure> {
+    ) -> Result<(tempfile::TempDir, Members), Failure> {
         self.total.store(expected.size, Ordering::Release);
         fs::create_dir_all(root)?;
         // An unfinished download is no runtime.
@@ -595,35 +596,38 @@ impl Install {
         let extracted = tempfile::Builder::new()
             .prefix(UNFINISHED)
             .tempdir_in(root)?;
-        // It names each member it lays, on its standard error.
         let mut tar = tokio::process::Command::new("/usr/bin/tar")
-            .arg("-xvJf")
+            .arg("-xJf")
             .arg(archive)
             .arg("-C")
             .arg(extracted.path())
             .env("LC_ALL", "C")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
             .kill_on_drop(true)
             .spawn()?;
-        let mut told = tar.stderr.take().ok_or(Failure::Storage)?;
-        let mut names = Vec::new();
-        let laid = async {
-            tokio::io::AsyncReadExt::read_to_end(&mut told, &mut names).await?;
-            tar.wait().await
+        // What it holds is read from the archive itself, never from what was
+        // laid of it.
+        let mut listing = Members::listing(archive).spawn()?;
+        let mut told = listing.stdout.take().ok_or(Failure::Storage)?;
+        let mut members = Vec::new();
+        let done = async {
+            tokio::try_join!(
+                tar.wait(),
+                async {
+                    tokio::io::AsyncReadExt::read_to_end(&mut told, &mut members).await?;
+                    listing.wait().await
+                },
+            )
         };
-        if !self.cancellable(laid).await??.success() {
+        let (laid, listed) = self.cancellable(done).await??;
+        if !laid.success() || !listed.success() {
             return Err(Failure::Damaged);
         }
         step("after-untar");
-        // Not one name that cannot be read: what cannot be told is not whole.
-        let members: Option<Vec<PathBuf>> = names
-            .split(|byte| *byte == b'\n')
-            .filter_map(|line| line.strip_prefix(b"x "))
-            .map(|name| member(name, &format!("voile-{}", expected.version)))
-            .collect();
-        Ok((extracted, members.filter(|members| !members.is_empty()).ok_or(Failure::Damaged)?))
+        let members = Members::read(&members, &format!("voile-{}", expected.version));
+        Ok((extracted, members.ok_or(Failure::Damaged)?))
     }
 
     async fn download(
@@ -706,54 +710,29 @@ fn to_repair(root: &Path, offer: &Offer) -> Option<String> {
         .map(|(_, name)| name)
 }
 
-/// A member of a release's archive, as tar names it in the C locale, by its
-/// path in the release's own `folder`: the only folder an archive holds.
-fn member(told: &[u8], folder: &str) -> Option<PathBuf> {
-    use std::os::unix::ffi::OsStringExt;
-    // What is not printable ASCII is escaped.
-    let mut name = Vec::new();
-    let mut rest = told;
-    while let Some((&byte, after)) = rest.split_first() {
-        rest = after;
-        if byte != b'\\' {
-            name.push(byte);
-            continue;
-        }
-        let digits = after.get(..3).filter(|digits| digits.iter().all(|digit| matches!(digit, b'0'..=b'7')));
-        if let Some(digits) = digits {
-            name.push(u8::try_from(digits.iter().fold(0_u32, |value, digit| value * 8 + u32::from(digit - b'0'))).ok()?);
-            rest = &after[3..];
-            continue;
-        }
-        let (&escaped, after) = after.split_first()?;
-        name.push(match escaped {
-            b'a' => 7,
-            b'b' => 8,
-            b't' => b'\t',
-            b'n' => b'\n',
-            b'v' => 11,
-            b'f' => 12,
-            b'r' => b'\r',
-            b'\\' => b'\\',
-            _ => return None,
-        });
-        rest = after;
-    }
-    let path = PathBuf::from(std::ffi::OsString::from_vec(name));
-    let path = path.strip_prefix(".").unwrap_or(&path);
-    path.strip_prefix(folder).ok().map(Path::to_owned)
-}
-
 /// Checks that `runtime` is the complete `release`: its Wine, every member of
-/// its archive, and for the release our engine files are for, its Linux
-/// engine as Voile ships it.
-fn whole(runtime: &Path, release: &str, members: &[PathBuf]) -> Result<(), Failure> {
+/// its archive as the archive holds it, and for the release our engine files
+/// are for, its Linux engine as Voile ships it, with whatever a game of any
+/// backend starts from.
+fn whole(runtime: &Path, release: &str, members: &Members) -> Result<(), Failure> {
+    if let Some(member) = members.differing(runtime) {
+        eprintln!("engine: {} is not what its archive holds", runtime.join(member).display());
+        return Err(Failure::Damaged);
+    }
     let linux = runtime.join(LINUX);
     let complete = holds(runtime, release)
-        && members.iter().all(|member| fs::symlink_metadata(runtime.join(member)).is_ok())
-        && (release != engine_patch::release() || has_engine(&linux))
+        && (release != engine_patch::release() || (has_engine(&linux) && required::complete(runtime)))
         && engine_patch::pristine(&linux, release);
     complete.then_some(()).ok_or(Failure::Damaged)
+}
+
+/// Whether `leftover`, of an install cut short, holds a whole runtime of
+/// another release than `release`: it may be the only one there is.
+fn saves_another(leftover: &Path, release: &str) -> bool {
+    fs::read_dir(leftover).into_iter().flatten().flatten().any(|entry| {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        name.strip_prefix("voile-").is_some_and(|other| other != release && holds(&entry.path(), other))
+    })
 }
 
 /// Exchanges the folders `staged` and `place`, in one step: there is no moment
@@ -796,22 +775,39 @@ pub fn remove_replaced(root: &Path) {
     let kept = kept
         .file_name()
         .map(|name| name.to_string_lossy().into_owned());
-    let mut held = Vec::new();
-    remove_entries(root, |name| {
-        let replaced = name != DEVELOPMENT
+    let replaced = |name: &str| {
+        name != DEVELOPMENT
             && Some(name) != kept.as_deref()
             && name != feed::KEPT
             && name != feed::PRERELEASES
-            && !name.starts_with(UNFINISHED);
-        // A release a game of any process still holds stays; one that goes
-        // is held until it is gone, so that no launch prepares in it.
-        if replaced && numbers(name).is_some() {
-            match engine_patch::Replacing::hold(&root.join(name)) {
-                Ok(Some(hold)) => held.push(hold),
+            && !name.starts_with(UNFINISHED)
+    };
+    let any = fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| replaced(&entry.file_name().to_string_lossy()));
+    if !any {
+        return;
+    }
+    // Held until they are gone, so that no launch prepares in one; while a
+    // launch or a game holds the library they all stay.
+    let Ok(Some(library)) = engine_patch::Alone::hold(root) else {
+        return;
+    };
+    if !library.idle() {
+        return;
+    }
+    let mut held = Vec::new();
+    remove_entries(root, |name| {
+        // A release a game of an earlier build still holds stays.
+        if replaced(name) && numbers(name).is_some() {
+            match library.release(&root.join(name)) {
+                Ok(Some(release)) => held.push(release),
                 Ok(None) | Err(_) => return false,
             }
         }
-        replaced
+        replaced(name)
     });
 }
 

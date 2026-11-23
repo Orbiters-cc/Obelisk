@@ -385,6 +385,89 @@ fn a_launch_on_the_linux_engine_without_its_pin_is_never_accepted() {
     }
 }
 
+/// Seventh verification, blocker 2: the same of a game on Rosetta's Wine, which
+/// held nothing until 0.1.10: its supervisor holds the library its preparation
+/// was admitted to until its game exits, and is never accepted without.
+#[test]
+fn a_game_on_rosetta_s_wine_holds_its_library_too() {
+    let library = tempfile::tempdir().unwrap();
+    let release = library.path().join("Voile/v9.0.0-1");
+    fs::create_dir_all(&release).unwrap();
+    let mut config = crate::wine::tests::config(library.path());
+    config.runtime = release.clone();
+    assert_eq!(config.settings.engine, crate::wine::Engine::Rosetta);
+    let voile = release.parent().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    fs::create_dir(other.path().join("Voile")).unwrap();
+    let pin = |voile: &Path| crate::voile::engine_patch::Admitted::take(voile).unwrap().pin().unwrap();
+    let foreign = pin(&other.path().join("Voile"));
+    for pin in [None, Some(&foreign)] {
+        let (_root, directory, sessions) = prepare(&Script {
+            wine: Some(config.clone()),
+            ..script(QUICK)
+        });
+        assert!(start_pinned::<Recording>(&directory, &sessions, pin).is_err());
+        assert!(!directory.join("ran").exists());
+    }
+    let held = pin(voile);
+    let (root, directory, sessions) = prepare(&Script {
+        wine: Some(config),
+        ..script(HELD)
+    });
+    let client = start_pinned::<Recording>(&directory, &sessions, Some(&held)).unwrap();
+    let run = Run::<Recording> {
+        _root: root,
+        directory,
+        sessions,
+        client,
+    };
+    drop(held);
+    run.until(|record| record.phase == Phase::Running);
+    assert!(crate::voile::engine_patch::Alone::hold(voile).unwrap().is_none());
+    run.release("release-game");
+    run.until(|record| record.finished());
+    free(&release);
+}
+
+/// What the supervisor holds reaches no game: none of the library's locks is
+/// open in it, on either engine.
+#[test]
+fn a_game_inherits_no_lock_of_its_supervisor() {
+    const LISTING: &str = r#"
+exec 8>&2
+/usr/sbin/lsof -n -P -w -p $$ -Fn > open
+printf ran > ran
+"#;
+    for engine in [crate::wine::Engine::Linux, crate::wine::Engine::Rosetta] {
+        let library = tempfile::tempdir().unwrap();
+        let (mut config, release) = on_the_linux_engine(library.path());
+        config.settings.engine = engine;
+        let pin = match engine {
+            crate::wine::Engine::Linux => crate::voile::engine_patch::apply(&config.runtime).unwrap().1,
+            crate::wine::Engine::Rosetta => {
+                config.runtime = release.clone();
+                crate::voile::engine_patch::Admitted::take(release.parent().unwrap()).unwrap().pin().unwrap()
+            }
+        };
+        let (root, directory, sessions) = prepare(&Script {
+            wine: Some(config),
+            ..script(LISTING)
+        });
+        fs::write(directory.join("game.log"), "").unwrap();
+        let client = start_pinned::<Recording>(&directory, &sessions, Some(&pin)).unwrap();
+        let run = Run::<Recording> {
+            _root: root,
+            directory,
+            sessions,
+            client,
+        };
+        run.until(|record| record.finished());
+        let open = fs::read_to_string(run.directory.join("open")).unwrap();
+        assert!(open.lines().count() > 3, "{engine:?}: {open}");
+        assert!(!open.contains(".lock"), "{engine:?}: {open}");
+    }
+}
+
 /// A game on the Linux engine that writes as its guest does: into the pipe its
 /// helper gets.
 const WRITING: &str = r#"

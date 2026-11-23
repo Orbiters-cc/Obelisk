@@ -203,5 +203,63 @@ pub(crate) fn listing(mut command: Command) -> Option<String> {
     code.map(|_| String::from_utf8_lossy(&bytes).into_owned())
 }
 
+/// What a listing command answered.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Answer {
+    /// It ended well, with this and nothing on its standard error.
+    Listed(String),
+    /// It found nothing: status 1 and not a word anywhere, as `ps` and `lsof`
+    /// end when nothing is there of what they were asked for.
+    Nothing,
+    /// It could not be run, was killed, took too long, or failed: why.
+    Failed(String),
+}
+
+/// As `listing`, for whoever acts on what is not listed: an answer that may
+/// not be whole is none.
+pub(crate) fn answer(mut command: Command, timeout: Duration) -> Answer {
+    let spawned = command
+        .env_clear()
+        .env("LC_CTYPE", "en_US.UTF-8")
+        .env("TZ", "UTC")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(error) => return Answer::Failed(format!("it cannot be run ({error})")),
+    };
+    fn read(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).map(|_| bytes)
+        })
+    }
+    let (Some(output), Some(errors)) = (child.stdout.take(), child.stderr.take()) else {
+        return Answer::Failed("it has no output".into());
+    };
+    let (output, errors) = (read(output), read(errors));
+    let status = match wine::wait(child, timeout) {
+        Ok(Some(status)) => status,
+        Ok(None) => return Answer::Failed("it took too long".into()),
+        Err(error) => return Answer::Failed(format!("it cannot be waited for ({error})")),
+    };
+    let (Ok(Ok(output)), Ok(Ok(errors))) = (output.join(), errors.join()) else {
+        return Answer::Failed("its output cannot be read".into());
+    };
+    let Ok(output) = String::from_utf8(output) else {
+        return Answer::Failed("its output is no text".into());
+    };
+    match (status, errors.is_empty(), output.is_empty()) {
+        (0, true, _) => Answer::Listed(output),
+        (1, true, true) => Answer::Nothing,
+        (status, _, _) => {
+            let said = String::from_utf8_lossy(&errors);
+            Answer::Failed(format!("it ended with {status}, saying {:?}", said.trim()))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

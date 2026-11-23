@@ -149,10 +149,10 @@ pub(crate) trait Launch: Sized + 'static {
     const BEGIN: bool = false;
 
     fn open(input: &mut dyn Read) -> Result<(Opening<Self::P>, Self), Failure<Self>>;
-    /// What holds the Linux engine `runtime` for this session: the lock its
+    /// What holds the runtime of a Windows game for this session: the lock its
     /// preparation took, which this process was started with.
-    fn pin(runtime: &std::path::Path) -> std::io::Result<crate::voile::engine_patch::Pin> {
-        crate::voile::engine_patch::Pin::inherited(runtime)
+    fn pin(wine: &crate::wine::Config) -> std::io::Result<crate::voile::engine_patch::Pin> {
+        crate::voile::engine_patch::Pin::inherited(&wine.runtime, wine.settings.engine)
     }
     /// Stops the storefront's own preparation outside Cloud, such as Steam's
     /// native host, when the launch is cancelled or revoked before spawn.
@@ -551,14 +551,13 @@ pub(crate) fn serve<L: Launch>(
     // The executor exists before any durable write.
     let executor = crate::executor().map_err(Error::from)?;
     let (opening, mut launch) = L::open(&mut input)?;
-    // The Linux engine's files this launch was prepared on stay as they are until this supervisor ends, after
-    // the game: no update, repair or removal can change the window server, the render servers or the engine a
+    // The runtime this launch was prepared on stays as it is until this supervisor ends, after the game: no
+    // update, repair or removal can change the Wine, the window server, the render servers or the engine a
     // running game started from. It holds the lock its preparation took, inherited with this process; a launch
-    // without it is not accepted.
+    // of a Windows game without it is not accepted.
     let engine_pin = launch
         .wine()
-        .filter(|wine| wine.settings.engine == crate::wine::Engine::Linux)
-        .map(|wine| L::pin(&wine.runtime))
+        .map(|wine| L::pin(&wine))
         .transpose()
         .map_err(|_| Error::StartFailed)?;
     let owner = OwnerLock::<L::P>::take(&opening.root)?;

@@ -15,6 +15,15 @@ pub(super) fn step(name: &str) {
             .status();
         std::thread::sleep(Duration::from_secs(10));
     }
+    // (the staged runtime, or after the exchange the one in its place)
+    if std::env::var("OBELISK_TEST_CUT_SHORT_AT").as_deref() == Ok(name) {
+        let root = PathBuf::from(std::env::var_os("OBELISK_TEST_REPAIRED").unwrap()).join("Voile");
+        let runtime = match name {
+            "after-exchange" => root.join("v1.0.0-2"),
+            _ => remains(&root).remove(0).join("voile-v1.0.0-2"),
+        };
+        fs::write(runtime.join("linux/wine/bin/wine"), "w").unwrap();
+    }
 }
 
 /// A release archive laid out as voile's package.sh makes it, with the Linux
@@ -27,6 +36,12 @@ fn release_archive(directory: &Path, version: &str, manifest_version: &str) -> (
         &format!("voile-{version}"),
         &format!(r#"{{"version": "{manifest_version}"}}"#),
     );
+    packed(directory, version)
+}
+
+/// The archive of what is laid in `directory`'s `package`, and its release.
+fn packed(directory: &Path, version: &str) -> (PathBuf, Release) {
+    let package = directory.join("package");
     let archive = directory.join(format!("voile-{version}.tar.xz"));
     let status = std::process::Command::new("/usr/bin/tar")
         .arg("-cJf")
@@ -725,8 +740,13 @@ async fn a_disk_that_exchanges_nothing_is_not_repaired_in_place() {
     assert_eq!(told["args"][0], root.to_string_lossy().as_ref());
     assert!(root.join("v1.0.0-2/kept").exists());
     assert_eq!(names(&root), ["v1.0.0-2"]);
-    // A release that is not there yet needs no exchange.
+    // Seventh verification: nor is a release laid there anew, which no repair
+    // could be made of: refused alike, before any download.
     let (archive, release) = release_archive(directory.path(), "v1.0.0-3", "v1.0.0-3");
+    let laid = Install::new().install(&root, &release, Some(&root.join("no archive"))).await;
+    assert_eq!(laid, Err(Failure::Exchange(root.clone())));
+    assert_eq!(names(&root), ["v1.0.0-2"]);
+    fs::remove_file(directory.path().join("no-exchange")).unwrap();
     Install::new().install(&root, &release, Some(&archive)).await.unwrap();
 }
 
@@ -757,6 +777,104 @@ async fn an_extraction_that_lost_a_file_replaces_nothing() {
     let damaged = Install::new().install(&root, &release, Some(&archive)).await;
     assert_eq!(damaged, Err(Failure::Damaged), "its engine files are not Voile's");
     assert_eq!(names(&root), ["v1.0.0-2"]);
+}
+
+/// Seventh verification, blocker 3 (the verifier's fixture): what was laid is
+/// compared with the archive itself, member by member: a file cut short, of
+/// another content, of another kind, that cannot be run any more, or a link
+/// that leads elsewhere, is not the release.
+#[tokio::test]
+async fn a_staged_runtime_is_what_its_archive_holds_to_the_byte() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("Voile");
+    let version = "v1.0.0-2";
+    let package = directory.path().join("package");
+    lay(&package, "voile-v1.0.0-2", r#"{"version": "v1.0.0-2"}"#);
+    let laid = package.join("voile-v1.0.0-2");
+    fs::create_dir_all(laid.join("share/é 日")).unwrap();
+    fs::write(laid.join("share/é 日/a \\ b"), "odd").unwrap();
+    fs::set_permissions(laid.join("linux/wine/bin/wine"), fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink("wine", laid.join("linux/wine/bin/wine64")).unwrap();
+    let (archive, release) = packed(directory.path(), version);
+    let wine = "linux/wine/bin/wine";
+    type Spoil = fn(&Path) -> std::io::Result<()>;
+    let spoilt: [(&str, Spoil); 9] = [
+        (wine, |path| fs::write(path, "wi")),
+        (wine, |path| fs::write(path, "")),
+        (wine, |path| fs::write(path, "wind")),
+        (wine, |path| fs::set_permissions(path, fs::Permissions::from_mode(0o644))),
+        (wine, |path| fs::remove_file(path)),
+        (wine, |path| fs::rename(path, path.with_file_name("aside")).and_then(|()| std::os::unix::fs::symlink("aside", path))),
+        ("linux/wine/bin/wine64", |path| fs::remove_file(path).and_then(|()| std::os::unix::fs::symlink("bash", path))),
+        ("share/é 日/a \\ b", |path| fs::write(path, "ode")),
+        ("share/é 日", |path| fs::remove_dir_all(path).and_then(|()| fs::write(path, ""))),
+    ];
+    for (member, spoil) in spoilt {
+        let (staged, members) = Install::new().extract(&root, &release, Some(&archive)).await.unwrap();
+        let runtime = staged.path().join("voile-v1.0.0-2");
+        whole(&runtime, version, &members).unwrap();
+        spoil(&runtime.join(member)).unwrap();
+        assert_eq!(whole(&runtime, version, &members), Err(Failure::Damaged), "{member}");
+    }
+    // An archive that cannot be told member by member is no release.
+    assert_eq!(names(&root), Vec::<String>::new());
+    fs::hard_link(laid.join("bin/wine"), laid.join("bin/wine-again")).unwrap();
+    let (archive, release) = packed(directory.path(), version);
+    assert_eq!(Install::new().install(&root, &release, Some(&archive)).await, Err(Failure::Damaged));
+    assert_eq!(names(&root), Vec::<String>::new());
+}
+
+/// Blocker 3: damaged between its check and its place, or in its place, a
+/// runtime replaces nothing: what it was to replace is back.
+#[test]
+fn a_runtime_damaged_on_its_way_gives_the_place_back() {
+    for (step, replaces) in [("after-validation", true), ("after-lock", true), ("after-exchange", true), ("after-validation", false)] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Voile");
+        let (archive, release) = release_archive(directory.path(), "v1.0.0-2", "v1.0.0-2");
+        if replaces {
+            lay(&root, "v1.0.0-2", r#"{"version": "v1.0.0-2"}"#);
+            fs::write(root.join("v1.0.0-2/old"), "").unwrap();
+        }
+        fs::write(
+            directory.path().join("release"),
+            format!("{}\n{}\n{}", archive.display(), release.size, release.sha256),
+        )
+        .unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "voile::tests::a_repair_of_a_test_s"])
+            .env("OBELISK_TEST_REPAIRED", directory.path())
+            .env("OBELISK_TEST_CUT_SHORT_AT", step)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{step}");
+        let place = root.join("v1.0.0-2");
+        assert_eq!(place.join("old").exists(), replaces, "{step}");
+        assert_eq!(place.exists(), replaces, "{step}");
+        assert_eq!(remains(&root), Vec::<PathBuf>::new(), "{step}");
+    }
+}
+
+/// Blocker 3: an install retires what one cut short saved of its own release,
+/// once the new one is verified in its place, and never a whole runtime of
+/// another release, which may be the only one there is.
+#[tokio::test]
+async fn a_saved_runtime_of_another_release_is_never_retired() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("Voile");
+    let (archive, release) = release_archive(directory.path(), "v1.0.0-2", "v1.0.0-2");
+    lay(&root.join(".saved"), "voile-v1.0.0-1", r#"{"version": "v1.0.0-1"}"#);
+    lay(&root.join(".own"), "voile-v1.0.0-2", r#"{"version": "v1.0.0-2"}"#);
+    fs::create_dir_all(root.join(".part/voile-v1.0.0-1/bin")).unwrap();
+    fs::write(root.join(".download"), "").unwrap();
+    Install::new().install(&root, &release, Some(&archive)).await.unwrap();
+    assert_eq!(names(&root), [".saved", "v1.0.0-2"]);
+    let (archive, release) = release_archive(directory.path(), "v1.0.0-1", "v1.0.0-1");
+    Install::new().install(&root, &release, Some(&archive)).await.unwrap();
+    assert_eq!(names(&root), ["v1.0.0-1", "v1.0.0-2"]);
 }
 
 /// Finding 2 (the verifier's matrix): killed at any step, a repair leaves a
@@ -879,6 +997,8 @@ fn an_engine_that_lost_its_program_is_still_the_one_games_run_on() {
     let root = directory.path().join("Voile");
     lay(&root, "v1.0.0-2", r#"{"version": "v1.0.0-2"}"#);
     let linux = root.join("v1.0.0-2/linux");
+    required::tests::lay(&linux);
+    let missing = |linux: &Path| lacking(linux, crate::wine::Engine::Linux, crate::wine::Graphics::Dxmt);
     assert_eq!(missing(&linux), Vec::<String>::new());
     fs::remove_file(linux.join("engine/fexdarwin-run")).unwrap();
     assert_eq!(linux_runtime(&root), Some(linux.clone()));
@@ -892,17 +1012,6 @@ fn an_engine_that_lost_its_program_is_still_the_one_games_run_on() {
     lay(&root, ours, &format!(r#"{{"version": "{ours}"}}"#));
     fs::remove_dir_all(root.join(ours).join(LINUX)).unwrap();
     assert_eq!(linux_runtime(&root), Some(root.join(ours).join(LINUX)));
-}
-
-/// What tar writes of a member, whatever its characters.
-#[test]
-fn a_member_s_name_is_read_as_tar_writes_it() {
-    let read = |told: &[u8]| member(told, "voile-v1.0.0-2");
-    assert_eq!(read(b"voile-v1.0.0-2/").unwrap(), Path::new(""));
-    assert_eq!(read(b"./voile-v1.0.0-2/bin/wine").unwrap(), Path::new("bin/wine"));
-    assert_eq!(read(br"voile-v1.0.0-2/e\314\201 \346\227\245/a\\b").unwrap(), Path::new("e\u{301} 日/a\\b"));
-    assert_eq!(read(b"elsewhere/bin/wine"), None);
-    assert_eq!(read(br"voile-v1.0.0-2/\q"), None);
 }
 
 /// With `OBELISK_VOILE_ARCHIVE` naming a real archive, `voile-<version>.tar.xz`:

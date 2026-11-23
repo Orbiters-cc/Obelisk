@@ -6,7 +6,7 @@
 use crate::{
     launch::Error,
     supervisor::{Target, architecture::Architecture},
-    voile::engine_patch::Pin,
+    voile::engine_patch::{Admitted, Pin},
 };
 use obelisk_core::{Platform, launch::LaunchTarget};
 use serde::{Deserialize, Serialize};
@@ -249,14 +249,15 @@ trait Adapter {
     /// Readies config's prefix for a game whose program is already checked:
     /// creates or updates it, has `storefront` furnish it, then makes the
     /// log's folder. Fails with WineUnavailable before the prefix is created.
-    /// Returns what holds the engine's files as this launch found them, for
-    /// an engine whose files may change.
+    /// Returns what holds the runtimes' files as this launch, `admitted` to
+    /// the library before its runtime was picked, found them.
     fn ready(
         &self,
         config: &Config,
         locations: &crate::Locations,
         storefront: &dyn Furnisher,
-    ) -> Result<Option<Pin>, Error>;
+        admitted: Admitted,
+    ) -> Result<Pin, Error>;
     /// How `program`, checked inside `game.install`, starts with
     /// `launched`'s arguments and working directory, behind the storefront's
     /// helper, with `environment`, the Game session's own.
@@ -456,9 +457,34 @@ fn prepare<S: Storefront>(
     install: &Path,
     target: &LaunchTarget,
     storefront: &S,
-) -> Result<Option<Pin>, Error> {
+    admitted: Admitted,
+) -> Result<Pin, Error> {
     program(install, target)?;
-    config.adapter().ready(config, locations, storefront)
+    config.adapter().ready(config, locations, storefront, admitted)
+}
+
+/// Admits a launch to the library of `locations`, which waits for a change of
+/// its runtimes under way.
+fn admit(locations: &crate::Locations) -> Result<Admitted, Error> {
+    if !locations.voile.is_dir() {
+        return Err(Error::WineUnavailable);
+    }
+    Admitted::launch(&locations.voile).map_err(|refused| {
+        eprintln!("engine: not started: {refused}");
+        Error::EngineFiles(refused.into())
+    })
+}
+
+/// Refuses a runtime that lacks, or has damaged, a file `config`'s game cannot
+/// start without: it goes with what ends that, a repair.
+fn whole(config: &Config) -> Result<(), Error> {
+    let lacking = crate::voile::lacking(&config.runtime, config.settings.engine, config.settings.graphics);
+    if lacking.is_empty() {
+        return Ok(());
+    }
+    let refused = crate::voile::engine_patch::Incoherent::missing(&config.runtime, lacking);
+    eprintln!("engine: not started: {refused}");
+    Err(Error::EngineFiles(refused.into()))
 }
 
 /// The game `target` names, or the program its launch settings start
@@ -524,7 +550,7 @@ pub(crate) fn windows_path(path: &Path) -> String {
 }
 
 /// A Windows installation readied for one launch: how its game runs, and what
-/// holds its engine's files until the launch's supervisor does.
+/// holds its runtime's files until the launch's supervisor does.
 #[derive(Debug)]
 pub struct Ready {
     pub config: Config,
@@ -598,10 +624,13 @@ impl Installation {
         target: &LaunchTarget,
         storefront: &S,
     ) -> Result<Ready, Error> {
+        // Before its runtime is picked: none is replaced or removed from here
+        // on, until the game has exited.
+        let admitted = admit(locations)?;
         let config = self.runtime(locations)?;
         let target = self.settings.started(&self.install, target);
-        let pin = prepare(&config, locations, &self.install, &target, storefront)?;
-        Ok(Ready { config, pin })
+        let pin = prepare(&config, locations, &self.install, &target, storefront, admitted)?;
+        Ok(Ready { config, pin: Some(pin) })
     }
 
     /// How its game runs, once Voile is installed.

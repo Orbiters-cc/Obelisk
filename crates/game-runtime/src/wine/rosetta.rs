@@ -1,7 +1,7 @@
 //! Voile's Wine for macOS, which Rosetta runs: the engine of every Windows
 //! game whose Launch settings name no other.
 use super::{
-    Adapter, Additions, Config, Facts, Furnisher, Game, Graphics, Pin, Prerequisite, Programs,
+    Adapter, Additions, Admitted, Config, Facts, Furnisher, Game, Graphics, Pin, Prerequisite, Programs,
 };
 use crate::{
     launch::Error,
@@ -114,14 +114,18 @@ impl Adapter for RosettaWine {
         config: &Config,
         locations: &crate::Locations,
         storefront: &dyn Furnisher,
-    ) -> Result<Option<Pin>, Error> {
+        admitted: Admitted,
+    ) -> Result<Pin, Error> {
+        // No file of its runtime changes: the library's lock is enough.
+        let pin = admitted.pin()?;
+        if installed(config) {
+            super::whole(config)?;
+        }
         boot(config, &locations.home)?;
         storefront.furnish_prefix(config)?;
         install_prerequisites(config, &locations.home, &storefront.prerequisites_to_run()?)?;
         crate::wine::log_folder(config);
-        // It holds no pin: what replaces its runtime's files proves first
-        // that nothing of the library's engine runs (`voile/live.rs`).
-        Ok(None)
+        Ok(pin)
     }
 
     fn target(

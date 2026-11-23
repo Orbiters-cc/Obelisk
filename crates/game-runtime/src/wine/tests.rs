@@ -67,7 +67,14 @@ pub(crate) fn engine_runtime(locations: &crate::Locations) -> PathBuf {
     for library in ["d3d11.dll", "dxgi.dll", "d3d12.dll"] {
         fs::write(runtime.join("windows").join(library), library).unwrap();
     }
+    crate::voile::required::tests::lay(&runtime);
     runtime
+}
+
+/// A launch admitted to the library of `locations`, where runtimes are.
+pub(crate) fn admitted(locations: &crate::Locations) -> Admitted {
+    fs::create_dir_all(&locations.voile).unwrap();
+    admit(locations).unwrap()
 }
 
 pub(crate) fn config(root: &Path) -> Config {
@@ -435,7 +442,8 @@ fn only_a_windows_program_inside_the_installation_starts_or_readies_a_prefix_on_
                     &locations(&root),
                     &install,
                     &target,
-                    &Plain::default()
+                    &Plain::default(),
+                    admitted(&locations(&root))
                 ),
                 Err(Error::NotExecutable)
             ));
@@ -693,6 +701,94 @@ fn a_runtime_that_lost_a_library_readies_no_game_and_a_prefix_without_neptune_s_
     fs::write(&copy, "wine's").unwrap();
     ready().unwrap();
     assert_eq!(fs::read(&copy).unwrap(), b"wine's");
+}
+
+/// Seventh verification, its first major (the verifier's broker fixture): a
+/// release that lost, or holds damaged, whatever the game's own backend starts
+/// from is refused by its path, with the repair that ends it, before any
+/// prefix is made.
+#[test]
+fn a_release_that_lost_what_its_backend_starts_from_is_refused_by_its_path() {
+    use crate::voile::engine_patch;
+    let vrchat = crate::profile::Game::Steam { app_id: 438100 };
+    for (path, dxmt) in [
+        ("graphics/bin/virgl_test_server", true),
+        ("graphics/x86_64/bin/virgl_test_server", false),
+        ("graphics/dxmt-native.framework/Versions/A/dxmt-native", true),
+        ("wine/bin/wineserver", true),
+        ("wine/lib/wine/x86_64-unix/wine", true),
+    ] {
+        let (_directory, root) = installation();
+        let locations = locations(&root);
+        crate::voile::take_prereleases(&locations.voile, true).unwrap();
+        let release = locations.voile.join(engine_patch::release());
+        crate::voile::required::tests::lay_release(&release);
+        let linux = release.join("linux");
+        engine_patch::lay_ours(&linux);
+        let (install, target) = game(&root);
+        // (the program VRChat's profile starts)
+        fs::write(install.join("start_protected_game.exe"), pe()).unwrap();
+        let windows = windows_of(&locations, vrchat, &install);
+        assert_eq!((windows.settings.engine, windows.settings.graphics), (Engine::Linux, Graphics::Dxmt));
+        let ready = || windows.ready(&locations, &target, &Plain::default());
+        fs::OpenOptions::new().write(true).open(linux.join(path)).unwrap().set_len(1).unwrap();
+        if dxmt {
+            match ready() {
+                Err(Error::EngineFiles(refused)) => {
+                    assert_eq!(refused.paths, [path]);
+                    assert_eq!(refused.action, engine_patch::Action::Repair);
+                }
+                other => panic!("{path}: {other:?}"),
+            }
+            assert!(!windows.prefix().exists(), "{path}");
+            continue;
+        }
+        // Another backend's is nothing of this game's.
+        fs::create_dir_all(windows.prefix().join("drive_c/windows/system32")).unwrap();
+        fs::write(windows.prefix().join("system.reg"), "registry").unwrap();
+        assert!(ready().unwrap().pin.is_some());
+    }
+}
+
+/// Seventh verification, blocker 2: a launch on either engine holds the
+/// library from before its runtime is picked to its own end, and nothing of
+/// the runtimes changes meanwhile, not even a release it does not run in.
+#[test]
+fn a_launch_on_either_engine_holds_the_library_s_runtimes() {
+    use crate::voile::engine_patch::{Alone, Replacing};
+    for game_of in [OTHER, crate::profile::Game::Steam { app_id: 438100 }] {
+        let (_directory, root) = installation();
+        let locations = locations(&root);
+        engine_runtime(&locations);
+        record_calls(&locations.voile.join("current"));
+        let (install, target) = game(&root);
+        // (the program VRChat's profile starts)
+        fs::write(install.join("start_protected_game.exe"), pe()).unwrap();
+        let windows = windows_of(&locations, game_of, &install);
+        fs::create_dir_all(windows.prefix().join("drive_c/windows/system32")).unwrap();
+        fs::write(windows.prefix().join("system.reg"), "registry").unwrap();
+        let ready = windows.ready(&locations, &target, &Plain::default()).unwrap();
+        assert!(ready.pin.is_some());
+        let held = || Alone::hold(&locations.voile).unwrap().is_none();
+        assert!(held());
+        assert!(Replacing::free(&locations.voile.join("v1.0.0-1")).unwrap().is_none());
+        drop(ready);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while held() {
+            assert!(Instant::now() < deadline, "its end lets go");
+            thread::sleep(Duration::from_millis(20));
+        }
+        // A change under way is waited for, then what it left is picked.
+        let change = Alone::hold(&locations.voile).unwrap().unwrap();
+        thread::scope(|scope| {
+            let waiting = scope.spawn(|| windows.ready(&locations, &target, &Plain::default()));
+            thread::sleep(Duration::from_millis(100));
+            assert!(!waiting.is_finished());
+            fs::rename(locations.voile.join("current"), locations.voile.join("moved")).unwrap();
+            drop(change);
+            assert!(matches!(waiting.join().unwrap(), Err(Error::WineUnavailable)));
+        });
+    }
 }
 
 #[test]
@@ -1126,6 +1222,7 @@ fn a_prefix_profile_stops_linking_into_the_mac_home() {
         &install,
         &target,
         &Plain::default(),
+        admitted(&locations(&root)),
     )
     .unwrap();
 
@@ -1269,6 +1366,7 @@ fn prepare_plain(config: &Config, root: &Path) {
         &install,
         &target,
         &Plain::default(),
+        admitted(&locations(root)),
     )
     .unwrap();
 }

@@ -874,7 +874,7 @@ fn smoke() {
     let launch = launch_target(&executable, &arguments);
 
     let locations = crate::wine::tests::locations(&root);
-    wine::prepare(&config, &locations, &install, &launch, &Plain).unwrap();
+    wine::prepare(&config, &locations, &install, &launch, &Plain, wine::tests::admitted(&locations)).unwrap();
     let target = wine::target::<Plain>(&config, &game(&install), &launch, HashMap::new()).unwrap();
     let output = Command::new(&target.executable)
         .args(&target.arguments)
