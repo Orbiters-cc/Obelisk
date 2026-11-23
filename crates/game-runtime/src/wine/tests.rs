@@ -708,6 +708,7 @@ fn a_runtime_that_lost_a_library_readies_no_game_and_a_prefix_without_neptune_s_
 /// from is refused by its path, with the repair that ends it, before any
 /// prefix is made.
 #[test]
+#[cfg_attr(feature = "developer-timeline", ignore = "two of its files come from a folder (developer.rs)")]
 fn a_release_that_lost_what_its_backend_starts_from_is_refused_by_its_path() {
     use crate::voile::engine_patch;
     let vrchat = crate::profile::Game::Steam { app_id: 438100 };
@@ -755,6 +756,7 @@ fn a_release_that_lost_what_its_backend_starts_from_is_refused_by_its_path() {
 /// refused by its path and by its name on either engine, whatever older
 /// release is whole beside it, and nothing is removed for it.
 #[test]
+#[cfg_attr(feature = "developer-timeline", ignore = "two of its files come from a folder (developer.rs)")]
 fn a_release_that_lost_its_wine_or_cannot_run_its_broker_names_itself() {
     use crate::voile::engine_patch;
     use std::os::unix::fs::PermissionsExt;
