@@ -556,6 +556,7 @@ dependencies = [
  "gog-kit",
  "obelisk-core",
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
