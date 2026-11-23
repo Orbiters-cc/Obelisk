@@ -199,6 +199,24 @@ for _ in $(seq 1 100); do
     sleep 0.05
 done
 
+# The guest's output goes to the log through a bounded writer: a line repeated without end (a renderer that retries
+# after its graphics went for good wrote 420 MB in five minutes, 2.6 million times each of three lines) is kept 200
+# times as it is, then counted: a line saying how many came so far at 1000, 10000, 100000 and every million, and the
+# totals at the end. The lines the frame counters and the incident capture read (Neptune's presents, the window
+# server's, the engine's own, the launch script's waits, a lost renderer's) always pass as they are, and nothing is
+# ever cut or rewritten: the log only grows. Lines differing in their numbers only count as one.
+log_filter='
+function key(s) { gsub(/0x[0-9a-fA-F]+/, "0x#", s); gsub(/[0-9]+/, "#", s); return s }
+/neptune unixlib wsi|guest swapchain|metal-HUD|wsd:|^lkd:|obelisk-wait:|destroying Neptune context|CONTEXT_LOST/ { print; fflush(); next }
+{
+    k = key($0); n = ++seen[k]
+    if (n == 1 && ++kinds > 50000) { for (x in seen) if (seen[x] > 200) printf "[obelisk-log: %d lines like this until here: %s]\n", seen[x], x; split("", seen); kinds = 1; seen[k] = 1; n = 1 }
+    if (n <= 200) { print; fflush() }
+    else if (n == 1000 || n == 10000 || n == 100000 || n % 1000000 == 0) { printf "[obelisk-log: %d lines like this so far, the ones after the first 200 left out: %s]\n", n, $0; fflush() }
+}
+END { for (x in seen) if (seen[x] > 200) printf "[obelisk-log: %d lines like this in all: %s]\n", seen[x], x }'
+# voile-lkd's recent-event ring for this session, new each start (the incident capture copies it while it runs).
+[ -n "${LKD_EVENT_RING-}" ] && rm -f "$LKD_EVENT_RING"
 export FEXDARWIN_LKD=1 FEXDARWIN_ROOT="$runtime/root" FEXDARWIN_ROOT_RO=1 FEXDARWIN_SUPERVISOR_PID=$$
 export FEXDARWIN_BIND="/opt/wine=$runtime/wine:ro;/home/user=$home;/opt/game=$install;/run/obelisk=$sockets_root/$sockets$binds"
 # wineserver writes the registry only when it exits: wait for it inside the guest before the game ends. Started
@@ -206,7 +224,7 @@ export FEXDARWIN_BIND="/opt/wine=$runtime/wine:ro;/home/user=$home;/opt/game=$in
 # Each of the two waits says when it returned (`obelisk-wait:` lines in the game's log), so that a quit that does not
 # finish shows which one it is stuck in.
 "$runtime/engine/fexdarwin-run" --cwd "$cwd" ${guest_env[@]+"${guest_env[@]}"} \
-    /bin/sh -c '/opt/wine/bin/wineserver -p0; /opt/wine/bin/wine "$@"; status=$?; echo "obelisk-wait: wine returned $status at $(date +%H:%M:%S.%N 2>/dev/null)" >&2; /opt/wine/bin/wineserver -w; echo "obelisk-wait: wineserver -w returned at $(date +%H:%M:%S.%N 2>/dev/null)" >&2; exit $status' sh "$@" &
+    /bin/sh -c '/opt/wine/bin/wineserver -p0; /opt/wine/bin/wine "$@"; status=$?; echo "obelisk-wait: wine returned $status at $(date +%H:%M:%S.%N 2>/dev/null)" >&2; /opt/wine/bin/wineserver -w; echo "obelisk-wait: wineserver -w returned at $(date +%H:%M:%S.%N 2>/dev/null)" >&2; exit $status' sh "$@" > >(LC_ALL=C /usr/bin/awk "$log_filter") 2>&1 &
 game=$!
 wait "$game"
 status=$?

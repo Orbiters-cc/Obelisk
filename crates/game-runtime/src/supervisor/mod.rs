@@ -196,6 +196,10 @@ pub struct Record<P: Provider> {
     #[serde(default)]
     pub starting: Option<StartingGame>,
     pub socket: PathBuf,
+    /// When this supervisor accepted a Quit (or Force Quit) of the running game, on the boot clock: what tells a
+    /// quit that does not finish from a game that never heard it, whatever the game itself can still log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quit_accepted: Option<crate::boot_clock::BootInstant>,
 }
 impl<P: Provider> Record<P> {
     /// Whether the game or starting process this record owns still lives.

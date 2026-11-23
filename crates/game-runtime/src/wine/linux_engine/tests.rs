@@ -897,3 +897,57 @@ fn smoke() {
     );
     assert!(output.status.success(), "{:?}", output.status);
 }
+
+/// Fourth verification, R6: a renderer that retries without end after its graphics went wrote 420 MB in five
+/// minutes. The launcher's bounded writer keeps the first 200 of a repeated line, then counts them, and passes every
+/// line the frame counters and the incident capture read as it is, in order; nothing is ever cut.
+#[test]
+fn a_flood_of_one_line_is_counted_and_the_counters_lines_pass() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_directory, root) = installation();
+    let runtime = recording_runtime(&root);
+    let flood = runtime.join("engine/fexdarwin-run");
+    fs::write(
+        &flood,
+        r#"#!/bin/sh
+i=0
+while [ $i -lt 30000 ]; do
+  echo "npt: memfd receive failed (attempt $i)"
+  if [ $((i % 5000)) -eq 0 ]; then echo "neptune unixlib wsi (wsd): $i presents (0 shown events), last 60: interval avg 16.0 ms"; fi
+  i=$((i + 1))
+done
+echo "npt: destroying Neptune context" >&2
+echo "an ordinary line"
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&flood, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = Command::new("/bin/bash")
+        .arg("-c")
+        .arg(LAUNCHER)
+        .arg("obelisk-linux-engine")
+        .arg(&runtime)
+        .arg(root.join("home"))
+        .arg(root.join("install"))
+        .arg("/opt/game")
+        .args(["--", "/opt/game/Game.exe"])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("TMPDIR", &root)
+        .env("OBELISK_TEST_ROOT", &root)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output.status);
+    let log = String::from_utf8_lossy(&output.stdout).into_owned() + &String::from_utf8_lossy(&output.stderr);
+    let repeated = log.lines().filter(|l| l.starts_with("npt: memfd receive failed")).count();
+    assert_eq!(repeated, 200, "the first 200 as they are");
+    assert!(log.contains("[obelisk-log: 1000 lines like this so far"), "{log:.2000}");
+    assert!(log.contains("[obelisk-log: 10000 lines like this so far"));
+    assert!(log.contains("[obelisk-log: 30000 lines like this in all: npt: memfd receive failed (attempt #)]"));
+    let presents: Vec<&str> = log.lines().filter(|l| l.contains("neptune unixlib wsi (wsd): ")).collect();
+    assert_eq!(presents.len(), 6, "every presents line passes: {presents:?}");
+    assert!(log.contains("npt: destroying Neptune context"));
+    assert!(log.contains("an ordinary line"));
+    assert!(log.len() < 64 << 10, "bounded: {} bytes", log.len());
+}

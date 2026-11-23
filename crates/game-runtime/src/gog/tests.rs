@@ -127,6 +127,7 @@ fn snapshot(cloud: crate::cloud::Status) -> Snapshot {
         shown: None,
         starting: None,
         socket: "/library/GOGSessions/socket".into(),
+        quit_accepted: None,
     }
 }
 

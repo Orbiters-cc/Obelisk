@@ -21,6 +21,8 @@ use std::{
 /// Starts the window server and Neptune's render server, then the game, and
 /// ends them with it (see the script).
 const LAUNCHER: &str = include_str!("linux_engine/launch.sh");
+/// voile-lkd's recent-event ring file (`LKD_EVENT_RING`).
+const EVENT_RING: &str = "LKD_EVENT_RING";
 /// The private folder of the window server and the render server that the
 /// launcher with `pid` started, in the temporary folder of its `environment`.
 fn sockets(environment: &HashMap<String, String>, pid: u32) -> PathBuf {
@@ -165,10 +167,13 @@ impl Adapter for LinuxEngine {
         }
         // The keyboard layout selected on the Mac, where the runtime is the
         // release the Orbiters fork's engine files are for; any other runs
-        // as Voile shipped it. A switch that failed and could not be undone
-        // leaves files of two sets, on which no game starts.
-        if let Err(mixed) = crate::voile::engine_patch::apply(&config.runtime) {
-            eprintln!("engine patch: the runtime's engine files are of two sets, not started: {}", mixed.paths.join(", "));
+        // as Voile shipped it. The files change only as one transaction and
+        // only while no game runs on the runtime; this launch pins them as
+        // they now are (its supervisor then holds its own pin to the game's
+        // exit). Files that are not one complete set start no game: the
+        // message names them and what to do.
+        if let Err(refused) = crate::voile::engine_patch::apply(&config.runtime, &config.prefix) {
+            eprintln!("engine patch: not started: {refused}");
             return Err(Error::WineIncomplete);
         }
         let direct3d = DIRECT3D.map(|library| config.runtime.join("windows").join(library));
@@ -223,6 +228,9 @@ impl Adapter for LinuxEngine {
         };
         let mut environment = environment;
         environment.insert(APP_NAME.to_owned(), name);
+        // voile-lkd's recent-event ring (attaches, ptrace stops, group stops: the last 8192, never capped), beside the
+        // log, where Orbiters - N4N0's incident capture finds it. The launcher starts each session with a new one.
+        environment.insert(EVENT_RING.to_owned(), config.log.with_extension("lkd-events").to_string_lossy().into_owned());
         let install = game.install.canonicalize()?;
         let working_directory = guest_path(&install, Path::new(&launched.working_directory))
             .unwrap_or_else(|| GAME.to_owned());

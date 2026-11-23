@@ -582,6 +582,7 @@ pub(crate) fn serve<L: Launch>(
         shown: None,
         starting: None,
         socket: socket.clone(),
+        quit_accepted: None,
     };
     journal::write(&opening.root, &record)?;
     let questions = Arc::new(Questions::supervised());
@@ -624,6 +625,13 @@ pub(crate) fn serve<L: Launch>(
         forced: Mutex::new(None),
     });
     let _ = session.interrupt.set(launch.interrupt());
+    // The Linux engine's files this launch was prepared on stay as they are until this supervisor ends,
+    // after the game: no update can change the window server, the render servers or the engine a running
+    // game started from (the preparation's own pin is let go once this one is held: before the first record).
+    let _engine_pin = launch.wine().filter(|wine| wine.settings.engine == crate::wine::Engine::Linux).map(|wine| {
+        crate::voile::engine_patch::Pin::hold(&wine.runtime)
+            .inspect_err(|error| eprintln!("engine patch: the runtime cannot be pinned for this session: {error}"))
+    });
     let _ = session.wine.set(launch.wine());
     let finished = Arc::new(AtomicBool::new(false));
     let listening = {
@@ -1112,6 +1120,11 @@ fn end<P: Provider>(session: &Arc<Session<P>>, id: &str, force: bool) -> Result<
         session.stop_preparation();
         session.notify();
         return Ok(());
+    }
+    // Accepted: said in the record before any of the work, with the moment on the boot clock.
+    if session.state.lock().unwrap().record.quit_accepted.is_none() {
+        let now = crate::boot_clock::now();
+        let _ = session.update(|r| r.quit_accepted = now);
     }
     if !session.underway(force).swap(true, Ordering::AcqRel) {
         // Held from spawn on: the session waits for a Force Quit only once
