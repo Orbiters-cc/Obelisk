@@ -18,11 +18,13 @@ Commands:
   steam installed                     List the installed games
   steam install <app_id> [--language <locale>]
                                       Install or update the Windows build of a game
-  steam play <app_id> [--steam-id <id>] [--render-percent <1..100>] [-- <args>...]
+  steam play <app_id> [--steam-id <id>] [--render-percent <1..100>] [--no-saved-arguments] [-- <args>...]
                                       Start an installed game and follow it until it ends;
                                       --steam-id starts it for that Steam account or not at all,
                                       --render-percent draws it at that share of the display's
-                                      pixels per side, for this launch only (Linux engine)
+                                      pixels per side, for this launch only (Linux engine),
+                                      --no-saved-arguments starts it without the arguments kept
+                                      in its launch settings: those after -- are the only ones
   steam running                       List the live Game sessions
   steam quit <app_id> [--session <id>] [--force] [--wait <seconds>]
                                       Ask a running game to end
@@ -67,6 +69,8 @@ pub enum Command {
         arguments: Vec<String>,
         /// The render percent of this launch alone, over the installation's own choice.
         render_percent: Option<u32>,
+        /// The arguments kept in the installation's launch settings start it too.
+        saved_arguments: bool,
     },
     Running,
     Quit {
@@ -213,11 +217,12 @@ fn command(mut words: Words, game: Vec<String>) -> Result<Command, Failure> {
         Some(word) => return Err(usage(format!("{word} is not expected here: see --help."))),
     }
     Ok(match command {
-        Command::Play { app_id, steam_id, render_percent, .. } => Command::Play {
+        Command::Play { app_id, steam_id, render_percent, saved_arguments, .. } => Command::Play {
             app_id,
             steam_id,
             arguments: game,
             render_percent,
+            saved_arguments,
         },
         command => command,
     })
@@ -243,7 +248,7 @@ fn steam(words: &mut Words) -> Result<Command, Failure> {
         }
         "play" => {
             let app_id = app_id(words.next(), "steam play")?;
-            let (mut steam_id, mut render_percent) = (None, None);
+            let (mut steam_id, mut render_percent, mut saved_arguments) = (None, None, true);
             loop {
                 match words.words.as_slice().first().map(String::as_str) {
                     Some("--steam-id") => {
@@ -262,10 +267,14 @@ fn steam(words: &mut Words) -> Result<Command, Failure> {
                             _ => return Err(usage(format!("--render-percent takes 1 to 100, not {value}."))),
                         };
                     }
+                    Some("--no-saved-arguments") => {
+                        words.next();
+                        saved_arguments = false;
+                    }
                     _ => break,
                 }
             }
-            Command::Play { app_id, steam_id, arguments: Vec::new(), render_percent }
+            Command::Play { app_id, steam_id, arguments: Vec::new(), render_percent, saved_arguments }
         }
         "quit" => {
             let app_id = app_id(words.next(), "steam quit")?;
@@ -452,7 +461,8 @@ mod tests {
                 app_id: 438100,
                 steam_id: None,
                 arguments: Vec::new(),
-                render_percent: None
+                render_percent: None,
+                saved_arguments: true
             }
         );
         assert_eq!(
@@ -477,7 +487,8 @@ mod tests {
                     "--".into(),
                     "--help".into()
                 ],
-                render_percent: None
+                render_percent: None,
+                saved_arguments: true
             }
         );
         assert_eq!(
@@ -486,7 +497,8 @@ mod tests {
                 app_id: 438100,
                 steam_id: None,
                 arguments: Vec::new(),
-                render_percent: None
+                render_percent: None,
+                saved_arguments: true
             }
         );
     }
@@ -499,7 +511,8 @@ mod tests {
                 app_id: 438100,
                 steam_id: None,
                 arguments: vec!["--no-vr".into()],
-                render_percent: Some(58)
+                render_percent: Some(58),
+                saved_arguments: true
             }
         );
         // After the two dashes it is the game's.
@@ -509,7 +522,38 @@ mod tests {
                 app_id: 438100,
                 steam_id: None,
                 arguments: vec!["--render-percent".into(), "58".into()],
-                render_percent: None
+                render_percent: None,
+                saved_arguments: true
+            }
+        );
+    }
+
+    #[test]
+    fn a_launch_without_the_saved_arguments_says_so_before_the_game_s_arguments() {
+        for line in [
+            &["steam", "play", "438100", "--no-saved-arguments", "--render-percent", "58", "--", "--no-vr"][..],
+            &["steam", "play", "438100", "--render-percent", "58", "--no-saved-arguments", "--", "--no-vr"],
+        ] {
+            assert_eq!(
+                command_of(line),
+                Command::Play {
+                    app_id: 438100,
+                    steam_id: None,
+                    arguments: vec!["--no-vr".into()],
+                    render_percent: Some(58),
+                    saved_arguments: false
+                }
+            );
+        }
+        // After the two dashes it is the game's, and the saved ones start it too.
+        assert_eq!(
+            command_of(&["steam", "play", "438100", "--", "--no-saved-arguments"]),
+            Command::Play {
+                app_id: 438100,
+                steam_id: None,
+                arguments: vec!["--no-saved-arguments".into()],
+                render_percent: None,
+                saved_arguments: true
             }
         );
     }
@@ -526,7 +570,8 @@ mod tests {
                     app_id: 438100,
                     steam_id: Some(76561197960265729),
                     arguments: vec!["--no-vr".into()],
-                    render_percent: Some(58)
+                    render_percent: Some(58),
+                    saved_arguments: true
                 }
             );
         }
@@ -572,6 +617,8 @@ mod tests {
             &["steam", "play", "438100", "--render-percent", "101"],
             &["steam", "play", "438100", "--render-percent", "+58"],
             &["steam", "play", "438100", "--render-percent", "58.5"],
+            &["steam", "play", "438100", "--no-saved-arguments=1"],
+            &["steam", "install", "438100", "--no-saved-arguments"],
             &["steam", "install", "438100", "--language"],
             &["steam", "installed", "--", "--no-vr"],
             &["steam", "login"],

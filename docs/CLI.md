@@ -23,6 +23,8 @@ This file is the contract a program is written against. Tests in `crates/obelisk
 
 ## State of this build
 
+0.1.13 changes no engine file: they are 0.1.8's to 0.1.12's, byte for byte, and an ordinary start gives the game the same process, arguments, environment, descriptors and signals as 0.1.12 did. It adds `steam play --no-saved-arguments` ([Commands](#commands)): a launch whose only player's arguments are the ones it was given. No game was started with this build before its release.
+
 0.1.12 changes no engine file: they are 0.1.8's to 0.1.11's, byte for byte, and an ordinary start gives the game the same process, arguments, environment, descriptors and signals as 0.1.11 did. A lock file that is there is opened to be read and only a missing one is made, so one that cannot be written is held like any other ([Keyboard layout](#keyboard-layout)); a release that lost its own `bin/wine`, and a program its user cannot run whatever others can, are named by [`engine_files`](#error-codes) with the release (0.1.11 ran an older release in place of the first, or installed it again unasked, and started on the second); an install of a release that is not there yet removes an unfinished one's folder only once nothing is seen running from one; a listing of `lsof` that ends in the middle of a record is not whole. No game was started with this build before its release.
 
 0.1.11 changes no engine file: they are 0.1.10's, 0.1.9's and 0.1.8's, byte for byte, and an ordinary start gives the game the same process, arguments, environment, descriptors and signals as 0.1.10 did. It closes what 0.1.10's checks left open: one lock for the whole library holds every launch, Rosetta's too, and every change of its runtimes apart ([Keyboard layout](#keyboard-layout)); the look at what runs tells "nothing runs" from "it cannot be told", and only the first lets a file change; a release is laid only once every member of it is what its archive holds, byte for byte, before its place and again in it ([`engine repair`](#engine-repair)); every file the game's own graphics backend starts from is looked at before a start, and says [`engine_files`](#error-codes); a disk that cannot be repaired is not installed on either. No game was started with this build before its release.
@@ -138,7 +140,7 @@ It runs the game's Transfer through the app's download queue whatever is install
 
 It needs a signed-in account and `obelisk-steam-host`, and ends with `busy` while a game runs.
 
-### `steam play <app_id> [--render-percent <1..100>] [-- <argument>...]`
+### `steam play <app_id> [--steam-id <id>] [--render-percent <1..100>] [--no-saved-arguments] [-- <argument>...]`
 
 Starts the installed Windows build as the app's Play does and stays attached until its Game session is finished:
 
@@ -153,9 +155,11 @@ Starts the installed Windows build as the app's Play does and stays attached unt
 
 `--render-percent` (from 0.1.7) has a game on Voile's Linux engine drawn at that share, per side, of the display's drawing resolution (100: as Voile draws it, the display's backing pixels): the engine's window server tells the game a smaller monitor and macOS scales the picture to the screen. For this launch only, over the game's own launch settings (`render_percent`), never kept. It must come before `--`; a value that is not a whole number from 1 to 100 is a `usage` failure. A game on Rosetta's Wine, whose engine offers none, ignores it. The window server writes what it applied in the game's log (`wsd: render percent: requested <n>, applied <n>; ... (desktop <w>x<h> px)`).
 
-Both come before `--`, in any order.
+`--no-saved-arguments` (from 0.1.13) starts the game without the arguments kept in its launch settings (the app's Launch Settings arguments): those after `--` are then the only ones of the player's, and none of them means none. For this launch only: what is kept stays kept, and every other launch setting (engine, graphics, render percent, Game Mode, the Performance HUD) applies as ever; so do Steam's own arguments and the game profile's. It is for a program that must know exactly what it starts the game with, such as one that names a VRChat profile: a kept `--profile=1` would reach the game beside, and before, the one it names.
 
-The arguments after `--` start the game after Steam's own, the game profile's and those kept in its launch settings, where the app's Launch Settings arguments go. Each is passed as it is given, never split or joined, and none is kept: the next launch does not have them. They are written to the head of the game's log, so pass no secret there.
+All three come before `--`, in any order.
+
+The arguments after `--` start the game after Steam's own, the game profile's and those kept in its launch settings (unless `--no-saved-arguments`), where the app's Launch Settings arguments go. Each is passed as it is given, never split or joined, and none is kept: the next launch does not have them. They are written to the head of the game's log, so pass no secret there.
 
 From `starting` on, the supervisor (`obelisk-steam-host`, in its own session) owns the game: the game runs on when `obelisk-cli` is killed, and `steam running` and `steam quit` find it. Before `starting`, the launch lives in this process: killing it abandons the launch, and a Transfer it interrupted resumes at the next `steam play` or `steam install`.
 

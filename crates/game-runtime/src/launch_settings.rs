@@ -198,6 +198,18 @@ pub fn override_render_percent(percent: u32) -> bool {
 /// What `override_render_percent` was given.
 static RENDER_PERCENT: OnceLock<u32> = OnceLock::new();
 
+/// The arguments kept in an installation's launch settings start no game this
+/// process launches (`obelisk-cli steam play --no-saved-arguments`): what
+/// `add_arguments` was given is then all of the player's. Its other launch
+/// settings apply as ever, and the arguments stay kept. A later call changes
+/// nothing and returns false.
+pub fn ignore_saved_arguments() -> bool {
+    IGNORE_SAVED.set(()).is_ok()
+}
+
+/// Whether `ignore_saved_arguments` was called.
+static IGNORE_SAVED: OnceLock<()> = OnceLock::new();
+
 /// What starts `game` in the player's language, `locale` such as `it_IT`,
 /// when the game reads its language from its command line rather than from
 /// Windows, and the player put no language of their own in `chosen`, their
@@ -521,21 +533,26 @@ impl View {
         locale: Option<&str>,
     ) -> Self {
         let added = ADDED.get().map(Vec::as_slice).unwrap_or_default();
-        Self::with(game, profile, choices, locale, added)
+        Self::with(game, profile, choices, locale, added, IGNORE_SAVED.get().is_none())
     }
 
     /// `new`, with `added` after the player's arguments: they start the game
-    /// as the player's do, and `choices` keeps none of them.
+    /// as the player's do, and `choices` keeps none of them. Without `saved`,
+    /// they are the only ones: the arguments `choices` keeps start nothing.
     fn with(
         game: profile::Game<'_>,
         profile: &Profile,
         choices: Choices,
         locale: Option<&str>,
         added: &[String],
+        saved: bool,
     ) -> Self {
         let mut settings = choices.apply(profile);
         if let Some(percent) = RENDER_PERCENT.get().copied().filter(|p| offer(settings.engine).offers_render_percent(*p)) {
             settings.render_percent = percent;
+        }
+        if !saved {
+            settings.arguments.clear();
         }
         settings.arguments.extend(added.iter().cloned());
         settings.locale = locale.map(str::to_owned);

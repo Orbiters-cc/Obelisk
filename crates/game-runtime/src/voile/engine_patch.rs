@@ -1812,7 +1812,7 @@ mod tests {
             }
             tried += 1;
         }
-        assert!(tried >= 10, "the cli-v0.1.2 to 0.1.11 tags");
+        assert!(tried >= 11, "the cli-v0.1.2 to 0.1.12 tags");
     }
     /// Fourth verification, finding 2: a crash at any point of a transaction is ended at the next launch from
     /// its record alone, and that launch starts on one complete set.

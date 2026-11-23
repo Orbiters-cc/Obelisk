@@ -483,7 +483,7 @@ fn what_a_launcher_adds_starts_the_game_after_the_player_s_arguments_and_is_neve
     let profile = profile::of(MINDSEYE, nowhere());
     let added = ["--no-vr".to_owned(), "two words".to_owned()];
 
-    let view = View::with(MINDSEYE, &profile, choices.clone(), None, &added);
+    let view = View::with(MINDSEYE, &profile, choices.clone(), None, &added, true);
 
     assert_eq!(
         view.settings.arguments,
@@ -497,8 +497,99 @@ fn what_a_launcher_adds_starts_the_game_after_the_player_s_arguments_and_is_neve
     let last: Vec<_> = started.arguments.iter().rev().take(3).rev().collect();
     assert_eq!(last, ["-windowed", "--no-vr", "two words"]);
     assert_eq!(started.arguments[0], "-steam");
-    let alone = View::with(MINDSEYE, &profile, Choices::default(), None, &[]);
+    let alone = View::with(MINDSEYE, &profile, Choices::default(), None, &[], true);
     assert!(alone.settings.arguments.is_empty());
+}
+
+#[test]
+fn a_launch_without_the_saved_arguments_has_the_launcher_s_only_and_every_other_choice() {
+    let choices = Choices {
+        arguments: Some("--profile=1 -kept".into()),
+        performance_hud: true,
+        ray_tracing: Some(false),
+        ..Choices::default()
+    };
+    let profile = profile::of(MINDSEYE, nowhere());
+    let added = ["--no-vr".to_owned(), "--profile=2".to_owned()];
+    let saved = View::with(MINDSEYE, &profile, choices.clone(), Some("it_IT"), &added, true);
+    assert_eq!(
+        saved.settings.arguments,
+        ["--profile=1", "-kept", "--no-vr", "--profile=2"]
+    );
+
+    let view = View::with(MINDSEYE, &profile, choices.clone(), Some("it_IT"), &added, false);
+
+    assert_eq!(view.settings.arguments, added, "only what was given");
+    assert_eq!(view.choices, choices, "the saved ones stay kept");
+    // The storefront's and the profile's arguments, and every other choice,
+    // are what they are with them.
+    let expected = Settings {
+        arguments: added.to_vec(),
+        ..saved.settings.clone()
+    };
+    assert_eq!(view.settings, expected);
+    let started = view.settings.started(
+        Path::new("/library/Games/game"),
+        &publisher("/library/Games/game/game.exe", &["-steam"]),
+    );
+    assert_eq!(started.arguments[0], "-steam");
+    assert!(!started.arguments.iter().any(|a| a == "--profile=1" || a == "-kept"));
+    let none = View::with(MINDSEYE, &profile, choices, None, &[], false);
+    assert!(none.settings.arguments.is_empty(), "none was given");
+}
+
+/// `obelisk-cli steam play --no-saved-arguments`, from the file the app keeps
+/// to what the game starts with: what a process says once is said for all its
+/// launches, so it is said in a process of this test's own.
+#[test]
+fn a_process_that_ignores_saved_arguments_starts_no_game_with_them() {
+    const CHILD: &str = "OBELISK_TEST_IGNORES_SAVED_ARGUMENTS";
+    let directory = tempfile::tempdir().unwrap();
+    let library = match std::env::var_os(CHILD) {
+        Some(library) => PathBuf::from(library),
+        None => directory.path().to_owned(),
+    };
+    let install = Path::new("/library/Games/VRChat");
+    let arguments = || of(&library, OTHER, install, None).settings.arguments;
+    if std::env::var_os(CHILD).is_some() {
+        assert_eq!(arguments(), ["--profile=1"], "before it is said");
+        assert!(super::ignore_saved_arguments() && !super::ignore_saved_arguments());
+        assert!(super::add_arguments(vec!["--profile=2".into()]));
+        assert_eq!(arguments(), ["--profile=2"]);
+        return;
+    }
+    let choices = Choices { arguments: Some("--profile=1".into()), ..Choices::default() };
+    choose(&library, OTHER, install, None, choices.clone()).unwrap();
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "launch_settings::tests::a_process_that_ignores_saved_arguments_starts_no_game_with_them"])
+        .env(CHILD, &library)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&child.stdout).into_owned();
+    assert!(child.status.success() && said.contains("1 passed"), "{said}");
+    // Kept as they were.
+    assert_eq!(load(&library, install), choices);
+    assert_eq!(arguments(), ["--profile=1"], "this process never said it");
+}
+
+/// A saved language is one of the arguments that are ignored: the player's
+/// own is then added, as for a game with none saved.
+#[test]
+fn an_ignored_saved_language_leaves_the_player_s() {
+    let choices = Choices {
+        arguments: Some("-language=FRA".into()),
+        ..Choices::default()
+    };
+    let profile = profile::of(ROCKET_LEAGUE, nowhere());
+    let language = |saved| {
+        View::with(ROCKET_LEAGUE, &profile, choices.clone(), Some("it_IT"), &[], saved)
+            .settings
+            .profile_arguments
+            .last()
+            .cloned()
+    };
+    assert_ne!(language(true).as_deref(), Some("-language=ITA"));
+    assert_eq!(language(false).as_deref(), Some("-language=ITA"));
 }
 
 #[test]

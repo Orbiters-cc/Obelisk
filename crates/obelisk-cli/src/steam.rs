@@ -453,12 +453,15 @@ impl Steam<'_> {
     /// session until it is finished. The supervisor owns the game: it runs on
     /// when this process ends. `steam_id` names the only account it may start
     /// for: the saved session read here, once, is the one it starts with.
+    /// Without `saved_arguments`, `arguments` are the only ones of the
+    /// player's: those kept in its launch settings start nothing.
     pub async fn play(
         &self,
         app_id: u32,
         steam_id: Option<u64>,
         arguments: Vec<String>,
         render_percent: Option<u32>,
+        saved_arguments: bool,
     ) -> Result<(), Failure> {
         let saved = credentials::signed_in(self.store)?;
         if steam_id.is_some_and(|expected| expected != saved.steam_id) {
@@ -518,6 +521,9 @@ impl Steam<'_> {
         // Read as its launch settings are, by this launch alone.
         if !arguments.is_empty() {
             game_runtime::launch_settings::add_arguments(arguments);
+        }
+        if !saved_arguments {
+            game_runtime::launch_settings::ignore_saved_arguments();
         }
         if let Some(percent) = render_percent {
             game_runtime::launch_settings::override_render_percent(percent);
