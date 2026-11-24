@@ -2,7 +2,7 @@
 //! the timeline generation record, how much, and what. From this program's own environment, checked, and only when this
 //! process was asked for that generation: the launcher (`launch.sh`) gives them to those two alone. Feature
 //! `developer-timeline` only. The window server's switches (`OBELISK_WSD_UPSCALE`, `OBELISK_WSD_PRESENT`) and the render server's
-//! (`OBELISK_DXMT_QUERY_RESCUE`) go the same way, with or without a recording.
+//! (`OBELISK_DXMT_QUERY_RESCUE`, `OBELISK_DXMT_INIT_ORDER`) go the same way, with or without a recording.
 use crate::voile::engine_patch::developer::{Generation, selected};
 use std::path::{Path, PathBuf};
 
@@ -10,11 +10,12 @@ const FOLDER: &str = "OBELISK_TIMELINE";
 /// The others, with what each may be.
 const NUMBERS: [(&str, std::ops::RangeInclusive<u32>); 2] = [("OBELISK_TIMELINE_MB", 1..=8192), ("OBELISK_TIMELINE_PASSES", 0..=1000)];
 
-/// The host programs' switches, with what each may be made of: the window server's two, then the render server's.
-const SWITCHES: [(&str, &[&str]); 3] = [
+/// The host programs' switches, with what each may be made of: the window server's two, then the render server's two.
+const SWITCHES: [(&str, &[&str]); 4] = [
     ("OBELISK_WSD_UPSCALE", &["metalfx"]),
     ("OBELISK_WSD_PRESENT", &["arrival", "attime", "nosync", "two"]),
     ("OBELISK_DXMT_QUERY_RESCUE", &["once"]),
+    ("OBELISK_DXMT_INIT_ORDER", &["1"]),
 ];
 
 /// What the launcher's environment gets; `seen` are the folders the game sees.
@@ -37,7 +38,7 @@ pub(super) fn variables(seen: &[&Path]) -> Vec<(String, String)> {
     variables
 }
 
-fn switches(values: [Option<String>; 3]) -> Result<Vec<(String, String)>, String> {
+fn switches(values: [Option<String>; 4]) -> Result<Vec<(String, String)>, String> {
     let mut variables = Vec::new();
     for ((name, known), value) in SWITCHES.into_iter().zip(values) {
         let Some(value) = value else { continue };
@@ -107,20 +108,23 @@ mod tests {
 
     #[test]
     fn the_host_programs_switches_are_the_known_ones() {
-        let ask = |upscale: Option<&str>, present: Option<&str>, queries: Option<&str>| switches([upscale, present, queries].map(|value| value.map(str::to_owned)));
-        assert_eq!(ask(None, None, None).unwrap(), []);
-        assert_eq!(ask(Some("metalfx"), Some("arrival,two"), Some("once")).unwrap().len(), 3);
-        assert_eq!(ask(None, Some("arrival"), None).unwrap(), [("OBELISK_WSD_PRESENT".to_owned(), "arrival".to_owned())]);
-        assert_eq!(ask(None, None, Some("once")).unwrap(), [("OBELISK_DXMT_QUERY_RESCUE".to_owned(), "once".to_owned())]);
+        let ask = |upscale: Option<&str>, present: Option<&str>, queries: Option<&str>, order: Option<&str>| switches([upscale, present, queries, order].map(|value| value.map(str::to_owned)));
+        assert_eq!(ask(None, None, None, None).unwrap(), []);
+        assert_eq!(ask(Some("metalfx"), Some("arrival,two"), Some("once"), Some("1")).unwrap().len(), 4);
+        assert_eq!(ask(None, Some("arrival"), None, None).unwrap(), [("OBELISK_WSD_PRESENT".to_owned(), "arrival".to_owned())]);
+        assert_eq!(ask(None, None, Some("once"), None).unwrap(), [("OBELISK_DXMT_QUERY_RESCUE".to_owned(), "once".to_owned())]);
+        assert_eq!(ask(None, None, None, Some("1")).unwrap(), [("OBELISK_DXMT_INIT_ORDER".to_owned(), "1".to_owned())]);
         for wrong in [
-            (Some("fsr"), None, None),
-            (None, Some("arrival,"), None),
-            (None, Some("arrival two"), None),
-            (Some("metalfx;rm"), None, None),
-            (None, None, Some("always")),
-            (None, None, Some("1")),
+            (Some("fsr"), None, None, None),
+            (None, Some("arrival,"), None, None),
+            (None, Some("arrival two"), None, None),
+            (Some("metalfx;rm"), None, None, None),
+            (None, None, Some("always"), None),
+            (None, None, Some("1"), None),
+            (None, None, None, Some("once")),
+            (None, None, None, Some("0")),
         ] {
-            assert!(ask(wrong.0, wrong.1, wrong.2).is_err(), "{wrong:?}");
+            assert!(ask(wrong.0, wrong.1, wrong.2, wrong.3).is_err(), "{wrong:?}");
         }
     }
 

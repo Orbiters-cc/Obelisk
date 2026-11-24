@@ -45,9 +45,10 @@ unset OBELISK_TIMELINE OBELISK_TIMELINE_MB OBELISK_TIMELINE_PASSES
 # The window server's own switches (developers only, the same way): how it scales and presents a frame. Its alone.
 wsd_upscale=${OBELISK_WSD_UPSCALE-} wsd_present=${OBELISK_WSD_PRESENT-}
 unset OBELISK_WSD_UPSCALE OBELISK_WSD_PRESENT
-# The render server's (developers only, the same way): what a look at a query that is not there does in DXMT. Its alone.
-query_rescue=${OBELISK_DXMT_QUERY_RESCUE-}
-unset OBELISK_DXMT_QUERY_RESCUE
+# The render server's (developers only, the same way): what a look at a query that is not there does in DXMT, and in what order its
+# immutable resources get their data. Its alone.
+query_rescue=${OBELISK_DXMT_QUERY_RESCUE-} init_order=${OBELISK_DXMT_INIT_ORDER-}
+unset OBELISK_DXMT_QUERY_RESCUE OBELISK_DXMT_INIT_ORDER
 if [ -n "$timeline" ]; then
     timeline="$timeline/$(date +%Y%m%d-%H%M%S)-$$"
     mkdir -m 700 "$timeline" || timeline=
@@ -235,12 +236,13 @@ if [ "$graphics" = d3dmetal ]; then
 else
     dxmt="$runtime/graphics/dxmt-native.framework/Versions/A/dxmt-native"
     [ -n "$query_rescue" ] && export OBELISK_DXMT_QUERY_RESCUE="$query_rescue"
+    [ -n "$init_order" ] && export OBELISK_DXMT_INIT_ORDER="$init_order"
     RENDER_SERVER_EXEC_PATH="$render" NPT_BACKEND=dxmt \
         NPT_D3D11_LIBRARY_PATH="$dxmt" NPT_DXGI_LIBRARY_PATH="$dxmt" NPT_D3D12_LIBRARY_PATH="$dxmt" \
         "$runtime/graphics/bin/virgl_test_server" --no-virgl --no-fork --socket-path "$sockets/vtest.sock" 9>&- &
 fi
 helpers+=($!)
-unset OBELISK_TIMELINE OBELISK_TIMELINE_MB OBELISK_TIMELINE_PASSES OBELISK_DXMT_QUERY_RESCUE
+unset OBELISK_TIMELINE OBELISK_TIMELINE_MB OBELISK_TIMELINE_PASSES OBELISK_DXMT_QUERY_RESCUE OBELISK_DXMT_INIT_ORDER
 # The input service gives the Mac's gamepads to Wine's Obelisk bus. A runtime without it starts the game without
 # gamepads.
 input=
