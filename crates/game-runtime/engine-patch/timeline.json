@@ -2,7 +2,7 @@
  "voile": "v26.3.0-27.beta1",
  "sources": {
   "voile-lkd": {
-   "commit": "db5829d6a31c79ad9ff4e04f9c53aa45c0b97d9a",
+   "commit": "52cbfd517610b105e7e4dedba1104a46b313c0b2",
    "base": "3a299f21da9e0553ac7c8cf658f0df4734f96e8a"
   },
   "neptune": {
@@ -10,7 +10,7 @@
    "base": "92f928c65764b2857ff8e7d6d5075ffcc01b94a0"
   },
   "dxmt": {
-   "commit": "a05c004b984bf221e3072f3d6396dcb9b6e3a9d4",
+   "commit": "ad8b1eb950549832275528992752e1462899a4f1",
    "base": "b7d97ee715fdfa8dc7ccd8c0ddbad7a22ac125f3"
   }
  },
@@ -27,7 +27,7 @@
    "source": "dxmt-native",
    "original": "a3730fcbc2efb9b1f403e637bd4fe079d29260005228041c0ef325535aa31120",
    "released": "a3730fcbc2efb9b1f403e637bd4fe079d29260005228041c0ef325535aa31120",
-   "timeline": "9e16d38352285044fd83347084ee1a5595981f107025b89c8e3aafbdb5dae0cf"
+   "timeline": "c700994a492e7225dda707919eeab80a35d7b539b85e30912ff0096b737ff695"
   },
   {
    "path": "graphics/lib/libvirglrenderer.1.dylib",
