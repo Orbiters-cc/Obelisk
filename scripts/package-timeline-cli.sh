@@ -17,9 +17,10 @@ STAGE="$WORK/obelisk-cli-$VERSION-arm64"
 codesign --verify --strict "$STAGE/obelisk-cli" || fail "The released obelisk-cli's signature is not good."
 TEAM="$(codesign -dv "$STAGE/obelisk-cli" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
 REQUIREMENT="$(codesign -d -r- "$STAGE/obelisk-cli" 2>/dev/null | sed -n 's/^designated => //p')"
-# The identity scripts/build-cli.sh signs a release with, and no other: another one's key may ask a question on the screen.
-IDENTITY="$(security find-identity -v -p codesigning | sed -n 's/^ *[0-9]*) \([0-9A-F]\{40\}\) "Developer ID Application.*/\1/p' | head -1)"
-[[ -n "$IDENTITY" ]] || fail "The Keychain has no Developer ID Application identity."
+# The identity scripts/build-cli.sh signs a release with, named by the caller as for it, and no other: another one's key may ask a
+# question on the screen.
+IDENTITY="${CLI_SIGN_IDENTITY:?the Developer ID Application identity, by its name}"
+[[ "$IDENTITY" == "Developer ID Application: "* ]] || fail "Only a Developer ID Application identity signs this."
 cp "$BUILT" "$WORK/try"
 codesign --force --sign "$IDENTITY" --timestamp=none --options runtime --identifier cc.orbiters.obelisk-cli "$WORK/try" 2>/dev/null &
 SIGNING=$!
