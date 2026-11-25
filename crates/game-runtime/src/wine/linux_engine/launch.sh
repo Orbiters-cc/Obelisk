@@ -15,6 +15,10 @@
 #   --render-percent N        the share of the screen's pixels per axis that the game sees (default 100, all of them;
 #                             wsd keeps it from 1 to 100): macOS scales the picture up to the screen
 #   --game-mode on|off        whether macOS turns Game Mode on while the game is full screen (default on)
+#   --free-pointer on|off     whether wsd holds the Mac's pointer only while the game confines it, and tells local programs what
+#                             the pointer does (default off: it holds it whenever the Wine driver asks)
+#   --shared-textures on|off  whether the render server gives the game's shared textures handles and local programs their
+#                             frames (default off: it refuses the handles; DXMT only)
 #   --bind GUEST=HOST[:ro]    a folder the guest also sees, at GUEST, whose parent exists in the root
 #   --env NAME=VALUE          a variable of the guest
 #   --pass NAME               this script's variable NAME, when set, as a variable of the guest
@@ -37,15 +41,19 @@ fi
 # The Steam host's discovery adapter is for macOS games; no process here needs it. On a Mac with SIP off, dyld also
 # inserts it into the system tools this script runs (mkdir, tr, tail), which are arm64e and abort without that slice.
 unset DYLD_INSERT_LIBRARIES
+# The render server's alone, and only when this launch asks for it (below).
+unset NPT_SHARED_PUBLISH
 runtime=$1 home=$2 install=$3 cwd=$4
 shift 4
-graphics=dxmt render_percent= game_mode=on binds= guest_env=()
+graphics=dxmt render_percent= game_mode=on free_pointer=off shared_textures=off binds= guest_env=()
 while [ $# -gt 0 ] && [ "$1" != "--" ]; do
     [ $# -ge 2 ] || exit 2
     case $1 in
     --graphics) graphics=$2 ;;
     --render-percent) render_percent=$2 ;;
     --game-mode) game_mode=$2 ;;
+    --free-pointer) free_pointer=$2 ;;
+    --shared-textures) shared_textures=$2 ;;
     --bind) binds="$binds;$2" ;;
     --env) guest_env+=(--env "$2") ;;
     --pass)
@@ -83,6 +91,18 @@ sockets_root=${TMPDIR:-/tmp}
 sockets=obelisk-engine-$$
 cd "$sockets_root" || exit 1
 mkdir -m 700 "$sockets" || exit 1
+# What local programs read of this session (wsd's pointer channel, the render server's shared textures) lies in a folder of
+# its own beside that one: the game sees the first (at /run/obelisk) and not this one. Only a launch that asks for one of them
+# has it, and one that cannot have it starts without them.
+host=
+if [ "$free_pointer" = on ] || [ "$shared_textures" = on ]; then
+    host=$sockets.host
+    mkdir -m 700 "$host" && mkdir -m 700 "$host/shared" || host=
+fi
+wsd_options=() publish=
+[ "$free_pointer" = on ] && wsd_options+=(--free-unconfined-pointer)
+[ "$free_pointer" = on ] && [ -n "$host" ] && wsd_options+=(--pointer-socket "$host/pointer.sock")
+[ "$shared_textures" = on ] && [ -n "$host" ] && publish=$host/shared
 
 helpers=()
 game=
@@ -101,6 +121,7 @@ finish() {
     done
     for helper in ${helpers[@]+"${helpers[@]}"}; do kill -KILL "$helper" 2>/dev/null; done
     rm -rf "${sockets_root:?}/$sockets"
+    [ -n "$host" ] && rm -rf "${sockets_root:?}/$host"
 }
 trap 'finish; trap - EXIT; exit 143' TERM INT HUP
 trap finish EXIT
@@ -178,7 +199,7 @@ else
     render=$(render_server "$runtime/graphics/libexec/virgl_render_server" dxmt) || exit 1
 fi
 
-"$app/Contents/MacOS/wsd" --dir "$sockets" ${render_percent:+--render-percent "$render_percent"} 9>&- &
+"$app/Contents/MacOS/wsd" --dir "$sockets" ${render_percent:+--render-percent "$render_percent"} ${wsd_options[@]+"${wsd_options[@]}"} 9>&- &
 helpers+=($!)
 if [ "$graphics" = d3dmetal ]; then
     # D3DMetal is an Intel library: the Intel render server runs it under Rosetta. d3dmetal-native loads the
@@ -194,11 +215,13 @@ if [ "$graphics" = d3dmetal ]; then
         "$server/bin/virgl_test_server" --no-virgl --no-fork --socket-path "$sockets/vtest.sock" 9>&- &
 else
     dxmt="$runtime/graphics/dxmt-native.framework/Versions/A/dxmt-native"
+    [ -n "$publish" ] && export NPT_SHARED_PUBLISH="$publish"
     RENDER_SERVER_EXEC_PATH="$render" NPT_BACKEND=dxmt \
         NPT_D3D11_LIBRARY_PATH="$dxmt" NPT_DXGI_LIBRARY_PATH="$dxmt" NPT_D3D12_LIBRARY_PATH="$dxmt" \
         "$runtime/graphics/bin/virgl_test_server" --no-virgl --no-fork --socket-path "$sockets/vtest.sock" 9>&- &
 fi
 helpers+=($!)
+unset NPT_SHARED_PUBLISH
 # The input service gives the Mac's gamepads to Wine's Obelisk bus. A runtime without it starts the game without
 # gamepads.
 input=

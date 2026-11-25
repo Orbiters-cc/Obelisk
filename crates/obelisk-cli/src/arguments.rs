@@ -1,6 +1,7 @@
 //! The command line, read without a library: a few commands, each with a few
 //! options, and a game's own arguments passed on as they are after `--`.
 use crate::failure::{Failure, USAGE};
+use game_runtime::launch_settings::HostFeatures;
 use std::path::PathBuf;
 
 /// What `--help` writes to standard error.
@@ -18,13 +19,16 @@ Commands:
   steam installed                     List the installed games
   steam install <app_id> [--language <locale>]
                                       Install or update the Windows build of a game
-  steam play <app_id> [--steam-id <id>] [--render-percent <1..100>] [--no-saved-arguments] [-- <args>...]
+  steam play <app_id> [--steam-id <id>] [--render-percent <1..100>] [--no-saved-arguments]
+             [--no-free-pointer] [--no-shared-textures] [-- <args>...]
                                       Start an installed game and follow it until it ends;
                                       --steam-id starts it for that Steam account or not at all,
                                       --render-percent draws it at that share of the display's
                                       pixels per side, for this launch only (Linux engine),
                                       --no-saved-arguments starts it without the arguments kept
-                                      in its launch settings: those after -- are the only ones
+                                      in its launch settings: those after -- are the only ones,
+                                      --no-free-pointer and --no-shared-textures start VRChat
+                                      without what the engine does for it alone
   steam running                       List the live Game sessions
   steam quit <app_id> [--session <id>] [--force] [--wait <seconds>]
                                       Ask a running game to end
@@ -71,6 +75,8 @@ pub enum Command {
         render_percent: Option<u32>,
         /// The arguments kept in the installation's launch settings start it too.
         saved_arguments: bool,
+        /// What the engine's host programs do for the game alone and not in this launch.
+        left_out: HostFeatures,
     },
     Running,
     Quit {
@@ -217,12 +223,13 @@ fn command(mut words: Words, game: Vec<String>) -> Result<Command, Failure> {
         Some(word) => return Err(usage(format!("{word} is not expected here: see --help."))),
     }
     Ok(match command {
-        Command::Play { app_id, steam_id, render_percent, saved_arguments, .. } => Command::Play {
+        Command::Play { app_id, steam_id, render_percent, saved_arguments, left_out, .. } => Command::Play {
             app_id,
             steam_id,
             arguments: game,
             render_percent,
             saved_arguments,
+            left_out,
         },
         command => command,
     })
@@ -249,6 +256,7 @@ fn steam(words: &mut Words) -> Result<Command, Failure> {
         "play" => {
             let app_id = app_id(words.next(), "steam play")?;
             let (mut steam_id, mut render_percent, mut saved_arguments) = (None, None, true);
+            let mut left_out = HostFeatures::default();
             loop {
                 match words.words.as_slice().first().map(String::as_str) {
                     Some("--steam-id") => {
@@ -271,10 +279,18 @@ fn steam(words: &mut Words) -> Result<Command, Failure> {
                         words.next();
                         saved_arguments = false;
                     }
+                    Some("--no-free-pointer") => {
+                        words.next();
+                        left_out.free_pointer = true;
+                    }
+                    Some("--no-shared-textures") => {
+                        words.next();
+                        left_out.shared_textures = true;
+                    }
                     _ => break,
                 }
             }
-            Command::Play { app_id, steam_id, arguments: Vec::new(), render_percent, saved_arguments }
+            Command::Play { app_id, steam_id, arguments: Vec::new(), render_percent, saved_arguments, left_out }
         }
         "quit" => {
             let app_id = app_id(words.next(), "steam quit")?;
@@ -462,7 +478,8 @@ mod tests {
                 steam_id: None,
                 arguments: Vec::new(),
                 render_percent: None,
-                saved_arguments: true
+                saved_arguments: true,
+                left_out: HostFeatures::default(),
             }
         );
         assert_eq!(
@@ -488,7 +505,8 @@ mod tests {
                     "--help".into()
                 ],
                 render_percent: None,
-                saved_arguments: true
+                saved_arguments: true,
+                left_out: HostFeatures::default(),
             }
         );
         assert_eq!(
@@ -498,7 +516,8 @@ mod tests {
                 steam_id: None,
                 arguments: Vec::new(),
                 render_percent: None,
-                saved_arguments: true
+                saved_arguments: true,
+                left_out: HostFeatures::default(),
             }
         );
     }
@@ -512,7 +531,8 @@ mod tests {
                 steam_id: None,
                 arguments: vec!["--no-vr".into()],
                 render_percent: Some(58),
-                saved_arguments: true
+                saved_arguments: true,
+                left_out: HostFeatures::default(),
             }
         );
         // After the two dashes it is the game's.
@@ -523,9 +543,36 @@ mod tests {
                 steam_id: None,
                 arguments: vec!["--render-percent".into(), "58".into()],
                 render_percent: None,
-                saved_arguments: true
+                saved_arguments: true,
+                left_out: HostFeatures::default(),
             }
         );
+    }
+
+    #[test]
+    fn what_the_engine_does_for_vrchat_alone_can_be_left_out_of_one_launch() {
+        for (words, free_pointer, shared_textures) in [
+            (&["--no-free-pointer"][..], true, false),
+            (&["--no-shared-textures"], false, true),
+            (&["--no-shared-textures", "--no-free-pointer"], true, true),
+        ] {
+            let line = [&["steam", "play", "438100"], words, &["--", "--no-vr"]].concat();
+            assert_eq!(
+                command_of(&line),
+                Command::Play {
+                    app_id: 438100,
+                    steam_id: None,
+                    arguments: vec!["--no-vr".into()],
+                    render_percent: None,
+                    saved_arguments: true,
+                    left_out: HostFeatures { free_pointer, shared_textures },
+                }
+            );
+        }
+        // Nothing turns them on.
+        for word in ["--free-pointer", "--shared-textures", "--no-free-pointer=1"] {
+            assert!(read(&["steam", "play", "438100", word]).is_err(), "{word}");
+        }
     }
 
     #[test]
@@ -541,7 +588,8 @@ mod tests {
                     steam_id: None,
                     arguments: vec!["--no-vr".into()],
                     render_percent: Some(58),
-                    saved_arguments: false
+                    saved_arguments: false,
+                    left_out: HostFeatures::default(),
                 }
             );
         }
@@ -553,7 +601,8 @@ mod tests {
                 steam_id: None,
                 arguments: vec!["--no-saved-arguments".into()],
                 render_percent: None,
-                saved_arguments: true
+                saved_arguments: true,
+                left_out: HostFeatures::default(),
             }
         );
     }
@@ -571,7 +620,8 @@ mod tests {
                     steam_id: Some(76561197960265729),
                     arguments: vec!["--no-vr".into()],
                     render_percent: Some(58),
-                    saved_arguments: true
+                    saved_arguments: true,
+                    left_out: HostFeatures::default(),
                 }
             );
         }

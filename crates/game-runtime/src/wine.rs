@@ -205,6 +205,12 @@ impl Config {
         if !self.settings.game_mode {
             header.push_str(" game_mode=off");
         }
+        if self.settings.host.free_pointer {
+            header.push_str(" free_pointer=on");
+        }
+        if self.settings.host.shared_textures {
+            header.push_str(" shared_textures=on");
+        }
         // Only a development runtime has no manifest.
         let voile = crate::voile::release_of(&self.runtime);
         header.push_str(&format!(

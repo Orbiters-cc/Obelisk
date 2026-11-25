@@ -179,7 +179,7 @@ fn a_command_that_needs_an_account_fails_signed_out_before_it_makes_or_reaches_a
         out: &out,
     };
     assert_eq!(
-        run(steam.play(438100, None, vec!["--no-vr".into()], None, true))
+        run(steam.play(438100, None, vec!["--no-vr".into()], None, true, HostFeatures::default()))
             .unwrap_err()
             .code,
         NOT_SIGNED_IN
@@ -203,7 +203,7 @@ fn a_launch_without_its_helpers_fails_before_it_reaches_steam() {
         out: &out,
     };
     assert_eq!(
-        run(steam.play(438100, None, Vec::new(), Some(58), false)).unwrap_err().code,
+        run(steam.play(438100, None, Vec::new(), Some(58), false, HostFeatures::default())).unwrap_err().code,
         HELPERS_MISSING
     );
     assert_eq!(run(steam.running()).unwrap_err().code, HELPERS_MISSING);
@@ -261,7 +261,7 @@ fn a_launch_for_one_account_never_starts_for_another() {
         store: &store,
         out: &out,
     };
-    let play = |steam_id| run(steam.play(438100, steam_id, Vec::new(), None, true)).unwrap_err().code;
+    let play = |steam_id| run(steam.play(438100, steam_id, Vec::new(), None, true, HostFeatures::default())).unwrap_err().code;
     assert_eq!(play(Some(gordon().steam_id + 1)), crate::failure::OTHER_ACCOUNT);
     assert!(out.events().is_empty() && !places.library.exists());
     // Its own goes on (as far as this test's missing helpers let it).

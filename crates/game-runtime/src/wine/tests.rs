@@ -1537,6 +1537,10 @@ fn a_configuration_reaches_its_game_session_whole() {
             render_percent: 50,
             game_mode: false,
             locale: Some("it_IT".into()),
+            host: crate::launch_settings::HostFeatures {
+                free_pointer: true,
+                shared_textures: true,
+            },
         },
     };
 
@@ -1564,6 +1568,13 @@ fn a_configuration_reaches_its_game_session_whole() {
             "game_mode",
             Settings {
                 game_mode: true,
+                ..config.settings.clone()
+            },
+        ),
+        (
+            "host",
+            Settings {
+                host: crate::launch_settings::HostFeatures::default(),
                 ..config.settings.clone()
             },
         ),

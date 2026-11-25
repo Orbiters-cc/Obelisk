@@ -322,6 +322,35 @@ fn a_render_resolution_the_linux_engine_offers_applies_and_is_kept_but_all_pixel
     assert_eq!(view.choices.render_percent, None);
 }
 
+/// VRChat alone asks the engine's host programs for anything, on the Linux
+/// engine alone, whatever table of profiles is read; a process can leave it
+/// out and turn nothing on.
+#[test]
+fn only_vrchat_asks_the_engine_s_host_programs_for_anything() {
+    let vrchat = profile::Game::Steam { app_id: 438100 };
+    let install = Path::new("/library/Games/Steam/steamapps/common/VRChat");
+    let linux = Profile {
+        engine: Engine::Linux,
+        graphics: Graphics::Dxmt,
+        ..Profile::default()
+    };
+    let host = |game, profile: &Profile, choices| View::with(game, profile, choices, None, &[], true).settings.host;
+    let both = HostFeatures { free_pointer: true, shared_textures: true };
+    assert_eq!(host(vrchat, &linux, Choices::default()), both);
+    assert_eq!(host(vrchat, &profile::of(vrchat, install), Choices::default()), both, "as its profile runs it");
+    let d3dmetal = Profile { graphics: Graphics::D3DMetal, ..linux.clone() };
+    assert_eq!(host(vrchat, &d3dmetal, Choices::default()), HostFeatures { shared_textures: false, ..both });
+    let rosetta = Choices { engine: Some(Engine::Rosetta), ..Choices::default() };
+    assert_eq!(host(vrchat, &linux, rosetta), HostFeatures::default());
+    for game in [ELDEN_RING, OTHER, MINDSEYE, profile::Game::Steam { app_id: 438101 }, profile::Game::Gog { product_id: "438100" }] {
+        assert_eq!(host(game, &linux, Choices::default()), HostFeatures::default(), "{game:?}");
+    }
+    // A handoff of an earlier build has no such field.
+    let mut handoff = serde_json::to_value(View::with(vrchat, &linux, Choices::default(), None, &[], true).settings).unwrap();
+    handoff.as_object_mut().unwrap().remove("host").unwrap();
+    assert_eq!(serde_json::from_value::<Settings>(handoff).unwrap().host, HostFeatures::default());
+}
+
 #[test]
 fn only_the_linux_engine_keeps_game_mode_off_and_only_off_is_kept_where_the_profile_leaves_it_on() {
     let off = |engine| Choices {

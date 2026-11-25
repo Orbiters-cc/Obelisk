@@ -17,6 +17,7 @@ This file is the contract a program is written against. Tests in `crates/obelisk
 - [The game's output](#the-games-output)
 - [Graphics](#graphics)
 - [The engine](#the-engine)
+- [What the engine does for VRChat alone](#what-the-engine-does-for-vrchat-alone)
 - [Questions answered in the player's place](#questions-answered-in-the-players-place)
 - [What the app does and this program does not](#what-the-app-does-and-this-program-does-not)
 - [Building and signing](#building-and-signing)
@@ -142,7 +143,7 @@ It runs the game's Transfer through the app's download queue whatever is install
 
 It needs a signed-in account and `obelisk-steam-host`, and ends with `busy` while a game runs.
 
-### `steam play <app_id> [--steam-id <id>] [--render-percent <1..100>] [--no-saved-arguments] [-- <argument>...]`
+### `steam play <app_id> [--steam-id <id>] [--render-percent <1..100>] [--no-saved-arguments] [--no-free-pointer] [--no-shared-textures] [-- <argument>...]`
 
 Starts the installed Windows build as the app's Play does and stays attached until its Game session is finished:
 
@@ -159,7 +160,9 @@ Starts the installed Windows build as the app's Play does and stays attached unt
 
 `--no-saved-arguments` (from 0.1.13) starts the game without the arguments kept in its launch settings (the app's Launch Settings arguments): those after `--` are then the only ones of the player's, and none of them means none. For this launch only: what is kept stays kept, and every other launch setting (engine, graphics, render percent, Game Mode, the Performance HUD) applies as ever; so do Steam's own arguments and the game profile's. It is for a program that must know exactly what it starts the game with, such as one that names a VRChat profile: a kept `--profile=1` would reach the game beside, and before, the one it names.
 
-All three come before `--`, in any order.
+`--no-free-pointer` and `--no-shared-textures` (unreleased) start VRChat without what the engine does [for it alone](#what-the-engine-does-for-vrchat-alone), for this launch only. No option turns either on for another game.
+
+All five come before `--`, in any order.
 
 The arguments after `--` start the game after Steam's own, the game profile's and those kept in its launch settings (unless `--no-saved-arguments`), where the app's Launch Settings arguments go. Each is passed as it is given, never split or joined, and none is kept: the next launch does not have them. They are written to the head of the game's log, so pass no secret there.
 
@@ -491,6 +494,19 @@ Tested: the unchanged sources rebuild the release's two render servers byte for 
 **The Dock icon.** Each Wine program sends its icon to the window server as it attaches, and the last one stayed: VRChat's `yt-dlp.exe`, started by a world's video player, put its own in the Dock. The window server now shows the icon of the client whose window first got a swapchain's plane (the game) until it disconnects, before that the one whose window was shown first, and never one without a window over one with a window (`tests/graphics/run-wsd-icon.sh`, two synthetic clients; the window server logs `application icon shown: ...`).
 
 Tested: the release's own `fexdarwin-run` rebuilt from its sources byte for byte but for the linker's UUID and the ad hoc signature (`scripts/build-engine-patch.sh` refuses to write a patch otherwise); LKD's ptrace and signal tests on ours; a guest shell run through it with a job-control stop and continue; the files of every earlier build (`cli-v0.1.2` to `cli-v0.1.6`) over a copy of the release as Voile ships it are replaced by these (`every_earlier_release_s_files_are_replaced`, run with `OBELISK_PRISTINE_RELEASE`).
+
+## What the engine does for VRChat alone
+
+Unreleased. For VRChat (Steam app 438100) on the Linux engine, and for no other game, two of the engine's programs on the Mac's side do something more; the launcher (`launch.sh`) gives them the options, and the game's log names them in its head (`free_pointer=on shared_textures=on`). Nothing the game runs, loads or maps is another for it, and any other game's launch is, argument for argument and variable for variable, what it was. It is no field of the game profiles, which Obelisk reads again from `main`.
+
+| | `--free-pointer on` (`steam play --no-free-pointer` leaves it out) | `--shared-textures on` (`--no-shared-textures`; DXMT only) |
+| --- | --- | --- |
+| program | the window server, `wsd --free-unconfined-pointer --pointer-socket <host folder>/pointer.sock` | the render server, `NPT_SHARED_PUBLISH=<host folder>/shared` |
+| what | the Mac's pointer is held only while the game confines it: free while VRChat's menus are open, as on Windows | a texture VRChat shares (its stream camera's, for Spout) gets a share handle, and its frames can be read by a program of the same user |
+| for local programs | the pointer's state, the game window's place, and the raw moves while it is held (voile-lkd's `wsd/PROTOCOL.md`, "Pointer channel"; `wsd/wsd_pointer.h`) | each live shared texture: token, size, format, whole frames in memory mapped read-only (Neptune's `virglrenderer/docs/shared-textures.md`; `npt_publish_wire.h`) |
+| in the log | `wsd: ... pointer held by the game` / `pointer freed by the game` | `npt: publish: ...` |
+
+The **host folder** is `<TMPDIR>/obelisk-engine-<pid>.host`, mode 700, where `<pid>` is the [Game session record](#game-session-records)'s `game.pid` and `<TMPDIR>` the launch's (the user's temporary folder, `getconf DARWIN_USER_TEMP_DIR`). It is beside the session's sockets (`obelisk-engine-<pid>`, which the game sees as `/run/obelisk`) and not in them: the game does not see it, and Force Quit, which ends whatever uses a file of the sockets' folder, never takes a program that reads here for the game's. It goes with the session; a launch that cannot make it starts without either channel. Both channels only tell: a reader that sends anything is disconnected, one that does not read is dropped, and nothing waits for a reader.
 
 ## Questions answered in the player's place
 

@@ -251,6 +251,14 @@ impl Adapter for LinuxEngine {
         if !config.settings.game_mode {
             arguments.extend(["--game-mode".to_owned(), "off".to_owned()]);
         }
+        // Without them, the window server and the render server run as for
+        // any other game.
+        if config.settings.host.free_pointer {
+            arguments.extend(["--free-pointer".to_owned(), "on".to_owned()]);
+        }
+        if config.settings.host.shared_textures {
+            arguments.extend(["--shared-textures".to_owned(), "on".to_owned()]);
+        }
         for (path, folder) in &guest.binds {
             arguments.push("--bind".to_owned());
             arguments.push(format!("{path}={}:ro", folder.display()));

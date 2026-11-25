@@ -333,6 +333,7 @@ fn recording_runtime(root: &Path) -> PathBuf {
 exec /usr/bin/nc -lU "$2/wsd.sock""#,
     );
     let server = r#"printf '%s\n' "$NPT_BACKEND $NPT_D3D12_LIBRARY_PATH" "$RENDER_SERVER_EXEC_PATH" "residency set ${DMN_RESIDENCY_SET-default}" > "$OBELISK_TEST_ROOT/server.txt"
+{ echo "publish ${NPT_SHARED_PUBLISH-nothing}"; ls -ld *.host *.host/shared 2>/dev/null | cut -c1-10; } > "$OBELISK_TEST_ROOT/publish.txt"
 exec /usr/bin/nc -lU "$4""#;
     script("graphics/bin/virgl_test_server", server);
     script("graphics/x86_64/bin/virgl_test_server", server);
@@ -346,7 +347,8 @@ exec /usr/bin/nc -lU "$4""#;
     );
     script(
         "engine/fexdarwin-run",
-        r#"{ printf '%s\n' "$FEXDARWIN_BIND" "files $(ulimit -S -n)"; printf '%s\n' "$@"; } > "$OBELISK_TEST_ROOT/engine.txt""#,
+        r#"echo "publish ${NPT_SHARED_PUBLISH-nothing}" > "$OBELISK_TEST_ROOT/guest-publish.txt"
+{ printf '%s\n' "$FEXDARWIN_BIND" "files $(ulimit -S -n)"; printf '%s\n' "$@"; } > "$OBELISK_TEST_ROOT/engine.txt""#,
     );
     runtime
 }
@@ -662,6 +664,72 @@ fn each_backend_s_render_server_runs_from_its_own_bundle_inside_the_game_s() {
             )),
             "{plist}"
         );
+    }
+}
+
+/// What the engine does for VRChat alone: the window server and the render
+/// server are told, and what they tell local programs lies in a folder the
+/// game does not see, which goes with the session. Without the options,
+/// nothing of it: the arguments and the environment of every earlier build.
+#[test]
+fn what_the_host_programs_do_for_one_game_reaches_them_alone_and_only_when_asked() {
+    for (options, wsd, publishes) in [
+        (&[][..], &[][..], false),
+        (&["--free-pointer", "off", "--shared-textures", "off"], &[], false),
+        (&["--free-pointer", "on"], &["--free-unconfined-pointer", "--pointer-socket", "H/pointer.sock"], false),
+        (&["--shared-textures", "on"], &[], true),
+        (
+            &["--render-percent", "45", "--free-pointer", "on", "--shared-textures", "on"],
+            &["--render-percent", "45", "--free-unconfined-pointer", "--pointer-socket", "H/pointer.sock"],
+            true,
+        ),
+        // D3DMetal's render server publishes nothing.
+        (&["--graphics", "d3dmetal", "--shared-textures", "on"], &[], false),
+    ] {
+        let (_directory, root) = installation();
+
+        // (a variable of the caller's reaches nothing)
+        let (engine, _) = run_launcher(&root, options, &[("NPT_SHARED_PUBLISH", "/tmp/caller")]);
+
+        let told = fs::read_to_string(root.join("wsd.txt")).unwrap();
+        let mut told: Vec<&str> = told.lines().collect();
+        assert_eq!(told.remove(0), "--dir", "{options:?}");
+        let sockets = told.remove(0);
+        assert!(sockets.starts_with("obelisk-engine-") && !sockets.contains('/'), "{sockets}");
+        let wsd: Vec<String> = wsd.iter().map(|word| word.replace('H', &format!("{sockets}.host"))).collect();
+        assert_eq!(told, wsd, "{options:?}");
+        let publish = fs::read_to_string(root.join("publish.txt")).unwrap();
+        let mut publish = publish.lines();
+        let folder = match publishes {
+            true => format!("publish {sockets}.host/shared"),
+            false => "publish nothing".to_owned(),
+        };
+        assert_eq!(publish.next().unwrap(), folder, "{options:?}");
+        let asked = options.windows(2).any(|pair| pair[0] != "--graphics" && pair[1] == "on");
+        let folders: Vec<&str> = publish.collect();
+        assert_eq!(folders, vec!["drwx------"; if asked { 2 } else { 0 }], "{options:?}");
+        assert_eq!(fs::read_to_string(root.join("guest-publish.txt")).unwrap(), "publish nothing\n");
+        // The game sees the sockets' folder, and not the other.
+        let binds = engine.lines().next().unwrap();
+        assert!(binds.contains(&format!("/run/obelisk={}/{sockets}", root.display())) && !binds.contains(".host"), "{binds}");
+        assert!(!root.join(sockets).exists() && !root.join(format!("{sockets}.host")).exists(), "gone with the session");
+    }
+}
+
+#[test]
+fn a_game_s_host_features_are_the_launcher_s_options() {
+    let (_directory, root) = installation();
+    let install = root.join("install");
+    fs::create_dir_all(&install).unwrap();
+    let executable = install.join("Game.exe");
+    fs::write(&executable, pe()).unwrap();
+    for (free_pointer, shared_textures) in [(false, false), (true, false), (false, true), (true, true)] {
+        let mut config = linux_config(&root);
+        config.settings.host = crate::launch_settings::HostFeatures { free_pointer, shared_textures };
+        let target = wine::target::<Plain>(&config, &game(&install), &launch_target(&executable, &[]), HashMap::new()).unwrap();
+        let on = |asked: bool| if asked { vec!["on"] } else { vec![] };
+        assert_eq!(options(&target, "--free-pointer"), on(free_pointer));
+        assert_eq!(options(&target, "--shared-textures"), on(shared_textures));
     }
 }
 

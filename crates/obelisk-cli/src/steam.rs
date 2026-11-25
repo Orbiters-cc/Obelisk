@@ -14,7 +14,7 @@ use crate::{
     follow::{self, Install, InstallStep, Play, PlayStep},
     places::Places,
 };
-use game_runtime::{installations::Receipt, steam::Steam as SteamStore};
+use game_runtime::{installations::Receipt, launch_settings::HostFeatures, steam::Steam as SteamStore};
 use obelisk_bridge::{
     AccountInstallations, CloudChoice, GameAccount, GameOffer, GameOpening, GamePlatform,
     GameSessionsState, Installation, OnlineStatus, SessionStorefront, SteamError, SteamGuardKind,
@@ -462,6 +462,7 @@ impl Steam<'_> {
         arguments: Vec<String>,
         render_percent: Option<u32>,
         saved_arguments: bool,
+        left_out: HostFeatures,
     ) -> Result<(), Failure> {
         let saved = credentials::signed_in(self.store)?;
         if steam_id.is_some_and(|expected| expected != saved.steam_id) {
@@ -527,6 +528,9 @@ impl Steam<'_> {
         }
         if let Some(percent) = render_percent {
             game_runtime::launch_settings::override_render_percent(percent);
+        }
+        if left_out != HostFeatures::default() {
+            game_runtime::launch_settings::leave_out_host_features(left_out);
         }
         installations.launch(installed.id.clone());
         let admitted = installations.state();

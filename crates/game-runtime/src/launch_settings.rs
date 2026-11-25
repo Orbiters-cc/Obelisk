@@ -74,6 +74,37 @@ pub struct Settings {
     /// game's environment instead.
     #[serde(default)]
     pub locale: Option<String>,
+    /// What the Linux engine's host programs do for this game alone; nothing
+    /// in a handoff that predates it.
+    #[serde(default)]
+    pub host: HostFeatures,
+}
+
+/// What the Linux engine's programs on the Mac's side (the window server and
+/// the render server) do for a game that asks for it, and for no other.
+/// Nothing the game runs, loads or maps is another for it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HostFeatures {
+    /// The Mac's pointer is held only while the game confines it, as on
+    /// Windows, and a local program can read what the pointer does.
+    pub free_pointer: bool,
+    /// The game's shared textures get handles, and local programs their
+    /// frames (a Spout sender's).
+    pub shared_textures: bool,
+}
+
+/// What `game` asks of the engine's host programs: VRChat frees the pointer
+/// while its menus are open and shares its stream camera's picture. This is
+/// no table field, as `language_argument` is none: the builds that read the
+/// table from `main` refuse an entry with a field they do not know, and that
+/// table's readers would take it away again.
+fn host_features(game: profile::Game<'_>) -> HostFeatures {
+    let vrchat = matches!(game, profile::Game::Steam { app_id: 438100 });
+    HostFeatures {
+        free_pointer: vrchat,
+        shared_textures: vrchat,
+    }
 }
 
 /// How a game no profile names runs without choices: in Rosetta's Wine,
@@ -206,6 +237,18 @@ static RENDER_PERCENT: OnceLock<u32> = OnceLock::new();
 pub fn ignore_saved_arguments() -> bool {
     IGNORE_SAVED.set(()).is_ok()
 }
+
+/// What the engine's host programs do not do for any game this process
+/// launches, whatever the game asks for (`obelisk-cli steam play
+/// --no-free-pointer`, `--no-shared-textures`): a field that is true is left
+/// out. Nothing can be turned on this way. A later call changes nothing and
+/// returns false.
+pub fn leave_out_host_features(left_out: HostFeatures) -> bool {
+    LEFT_OUT.set(left_out).is_ok()
+}
+
+/// What `leave_out_host_features` was given.
+static LEFT_OUT: OnceLock<HostFeatures> = OnceLock::new();
 
 /// Whether `ignore_saved_arguments` was called.
 static IGNORE_SAVED: OnceLock<()> = OnceLock::new();
@@ -399,6 +442,7 @@ impl Choices {
                 .filter(|_| offered.game_mode)
                 .unwrap_or(default_game_mode(profile, engine)),
             locale: None,
+            host: HostFeatures::default(),
         }
     }
 
@@ -556,6 +600,17 @@ impl View {
         }
         settings.arguments.extend(added.iter().cloned());
         settings.locale = locale.map(str::to_owned);
+        if settings.engine == Engine::Linux {
+            let asked = host_features(game);
+            let left_out = LEFT_OUT.get().copied().unwrap_or_default();
+            settings.host = HostFeatures {
+                free_pointer: asked.free_pointer && !left_out.free_pointer,
+                // (DXMT's shared textures: D3DMetal's render server has none.)
+                shared_textures: asked.shared_textures
+                    && !left_out.shared_textures
+                    && settings.graphics == Graphics::Dxmt,
+            };
+        }
         let language =
             locale.and_then(|locale| language_argument(game, &settings.arguments, locale));
         settings.profile_arguments.extend(language);
