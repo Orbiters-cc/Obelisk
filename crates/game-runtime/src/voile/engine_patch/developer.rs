@@ -383,7 +383,8 @@ mod tests {
         let released: Manifest = serde_json::from_str(super::super::MANIFEST).unwrap();
         let timeline = manifest();
         assert_eq!(timeline.voile, released.voile);
-        let host = ["engine/wsd", "graphics/libexec/virgl_render_server", "graphics/lib/libvirglrenderer.1.dylib", "graphics/dxmt-native.framework/Versions/A/dxmt-native"];
+        // (programs on the Mac's side alone: nothing the game runs, loads or maps)
+        let host = ["engine/wsd", "graphics/libexec/virgl_render_server", "graphics/x86_64/libexec/virgl_render_server"];
         assert_eq!(timeline.files.iter().map(|f| f.path.as_str()).collect::<std::collections::BTreeSet<_>>(), host.into_iter().collect());
         for file in &timeline.files {
             assert_ne!(file.timeline, file.released);
@@ -393,6 +394,6 @@ mod tests {
             }
         }
         let patch = patch_of(released, timeline, Generation::Released, None);
-        assert_eq!(patch.files.len(), 7);
+        assert_eq!(patch.files.len(), 5);
     }
 }
