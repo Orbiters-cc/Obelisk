@@ -10,6 +10,10 @@ publish.workspace = true
 name = "obelisk-cli"
 path = "src/main.rs"
 
+[features]
+# The timeline generation (docs/CLI.md): a developer's builds only, never a release's.
+developer-timeline = ["game-runtime/developer-timeline"]
+
 [dependencies]
 obelisk-bridge = { path = "../obelisk-bridge" }
 game-runtime.workspace = true

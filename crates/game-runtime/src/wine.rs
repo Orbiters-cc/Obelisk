@@ -20,6 +20,8 @@ use std::{
 };
 
 pub(crate) mod linux_engine;
+#[cfg(feature = "developer-timeline")]
+pub mod rehearsal;
 mod rosetta;
 
 /// The user every prefix of CrossOver's Wine names its profile after.

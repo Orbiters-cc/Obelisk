@@ -1,0 +1,33 @@
+{
+ "voile": "v26.3.0-27.beta1",
+ "sources": {
+  "voile-lkd": "b884da57aa38670f74d4ffe488b6079148e226db",
+  "neptune": "da1ac81aba9823ced67a3eb4cfd98b6d9c772678",
+  "obelisk": "0c445d9f4f1746a41307af76a0a98480aaeb6168"
+ },
+ "files": [
+  {
+   "path": "engine/wsd",
+   "source": "wsd",
+   "original": "3713717453718d0ab3f45a7a35d4ba26dc6f7bb7ccd1607171c83b3cef57ab69",
+   "released": "943a0b3c82af1e516926b3488b9116e71dde01c002a7806ec8dc83a1b55049fe",
+   "timeline": "ff9b4c279c77c08178695db7421fd5c331a932b5e0050074dad0b7b7d467b240"
+  },
+  {
+   "path": "graphics/libexec/virgl_render_server",
+   "source": "virgl_render_server",
+   "original": "792c7f355f39ac65b3eb436e0a1215a9ab3305c5d5248ab44c672d17bdbe32e5",
+   "released": "d40375f6dc2cc341c0e57eb426040ec3042676eaef5cb350a16db77acba5f240",
+   "timeline": "abc745454d530785fc46cef6b4b526d114af2c19c500e045392ec8f456db3138"
+  },
+  {
+   "path": "graphics/x86_64/libexec/virgl_render_server",
+   "source": "virgl_render_server-x86_64",
+   "original": "e1eda96ac201ab75bda67bbdd4b0a628a1323c60dde807272d189da4d1ea8113",
+   "released": "f138eae8b4b7acaa53895b8569492f0ead9fe0392d871e87500d9232f4e679a8",
+   "timeline": "f27ae6bef4978e32d9349290b7820cdafb38f84d1e8e7c84a749507440f8580b"
+  }
+ ],
+ "guest": {},
+ "rest_sha256": "b9c6d6f576afa11aac660c4af9ff8341b37b221bba7580f4f8832d18b797dc18"
+}
