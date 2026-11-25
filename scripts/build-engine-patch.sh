@@ -7,7 +7,9 @@
 #   virgl_render_server         Neptune's render server for arm64 (DXMT), which takes a resource update up to 1 GiB
 #   virgl_render_server-x86_64  the same for x86_64 (D3DMetal, under Rosetta)
 #   fexdarwin-run               voile-lkd's engine (FEXCore and LKD), whose ptrace never turns an attach's SIGSTOP into
-#                               a stop of the whole game (the 2026-11-23 VRChat hang)
+#                               a stop of the whole game (the 2026-11-23 VRChat hang), and whose threads are paused
+#                               only where they start again exactly (the 2026-11-24 VRChat crashes; FEX's changes are
+#                               voile-lkd's fexdarwin/fex-patches, applied by its build to a copy of FEX)
 #   manifest.json               the release, the sources' commits, and each file's SHA-256 before and after, with every
 #                               SHA-256 an earlier version of this manifest had for that file (its "previous"), so that
 #                               a player's files from an earlier obelisk-cli are replaced too
@@ -179,9 +181,10 @@ fi
 if [[ -n "${VOILE_LKD:-}" ]]; then
     LKD_BASE="$(field linux.voile-lkd)"
     based_on "$VOILE_LKD" "$LKD_BASE" || fail "$VOILE_LKD is not built on voile-lkd $LKD_BASE, which $RELEASE holds."
-    # Between the release's commit and ours, nothing but the keyboard layout's files may differ: the patch replaces
-    # these files and must not carry a change that needs another.
-    others="$(git -C "$VOILE_LKD" diff --name-only "$LKD_BASE" HEAD -- . ':!wsd' ':!lkd' ':!fexdarwin' ':!tests' ':!README.md' ':!docs')"
+    # Between the release's commit and ours, nothing but wsd's and fexdarwin-run's sources may differ: the patch replaces
+    # these files and must not carry a change that needs another. (tools/fix-generation puts a development build over
+    # an installed release; no build reads it.)
+    others="$(git -C "$VOILE_LKD" diff --name-only "$LKD_BASE" HEAD -- . ':!wsd' ':!lkd' ':!fexdarwin' ':!tests' ':!README.md' ':!docs' ':!tools/fix-generation')"
     [[ -z "$others" ]] || fail "voile-lkd changed outside wsd and fexdarwin-run's sources since $RELEASE: $others"
     [[ "$(git -C "$VOILE_LKD" rev-parse HEAD:fex)" == "$(field linux.fex)" ]] || fail "voile-lkd's fex is not the release's FEX."
     : "${FEX:?set FEX to a checkout of Zagrios/FEX at the fex commit of the release, with its submodules}"
