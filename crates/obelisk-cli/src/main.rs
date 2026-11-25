@@ -80,8 +80,8 @@ async fn dispatch(
         Command::Logout => steam.logout().await,
         Command::Installed => steam.installed(),
         Command::Install { app_id, language } => steam.install(app_id, language).await,
-        Command::Play { app_id, steam_id, arguments, render_percent, saved_arguments, left_out } => {
-            steam.play(app_id, steam_id, arguments, render_percent, saved_arguments, left_out).await
+        Command::Play { app_id, steam_id, arguments, render_percent, saved_arguments, host } => {
+            steam.play(app_id, steam_id, arguments, render_percent, saved_arguments, host).await
         }
         Command::Running => steam.running().await,
         Command::Quit {
@@ -116,6 +116,7 @@ fn status(places: &Places, store: &dyn CredentialStore) -> Event {
             installed: obelisk_bridge::installed_voile_release(locations),
         },
         helpers: places.helpers(),
+        play_options: arguments::PLAY_OPTIONS,
     }
 }
 
@@ -164,6 +165,8 @@ mod tests {
         assert_eq!(told["voile"]["prereleases"], false);
         assert_eq!(told["voile"]["keyboard_layout"], serde_json::Value::Null);
         assert_eq!(told["helpers"]["found"], false);
+        let options = ["--steam-id", "--render-percent", "--no-saved-arguments", "--free-pointer", "--shared-textures"];
+        assert_eq!(told["play_options"], serde_json::json!(options));
         assert!(!line.contains("secret-refresh-token"));
         assert!(
             !places.library.exists(),

@@ -667,12 +667,12 @@ fn each_backend_s_render_server_runs_from_its_own_bundle_inside_the_game_s() {
     }
 }
 
-/// What the engine does for VRChat alone: the window server and the render
-/// server are told, and what they tell local programs lies in a folder the
+/// What the engine does for a launch that asks: the window server and the
+/// render server are told, and what they tell local programs lies in a folder the
 /// game does not see, which goes with the session. Without the options,
 /// nothing of it: the arguments and the environment of every earlier build.
 #[test]
-fn what_the_host_programs_do_for_one_game_reaches_them_alone_and_only_when_asked() {
+fn what_the_host_programs_do_for_one_launch_reaches_them_alone_and_only_when_asked() {
     for (options, wsd, publishes) in [
         (&[][..], &[][..], false),
         (&["--free-pointer", "off", "--shared-textures", "off"], &[], false),

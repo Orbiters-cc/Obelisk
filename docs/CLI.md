@@ -17,12 +17,14 @@ This file is the contract a program is written against. Tests in `crates/obelisk
 - [The game's output](#the-games-output)
 - [Graphics](#graphics)
 - [The engine](#the-engine)
-- [What the engine does for VRChat alone](#what-the-engine-does-for-vrchat-alone)
+- [What a launch can ask of the engine](#what-a-launch-can-ask-of-the-engine)
 - [Questions answered in the player's place](#questions-answered-in-the-players-place)
 - [What the app does and this program does not](#what-the-app-does-and-this-program-does-not)
 - [Building and signing](#building-and-signing)
 
 ## State of this build
+
+0.1.15 changes three engine files, all of the Mac's side: the window server `engine/wsd` (Orbiters-cc/voile-lkd tag `orbiters-cli-0.1.15`, `b884da5`; SHA-256 `943a0b3c…` → `ff9b4c279c77c08178695db7421fd5c331a932b5e0050074dad0b7b7d467b240`) and Neptune's two render servers (Orbiters-cc/neptune tag `orbiters-cli-0.1.15`, `da1ac81`; arm64 `d40375f6…` → `fb0ceb6ab5ceddf182a58c6f004cf910ca50813002f0c32b79184fe74b68c7a3`, x86_64 `f138eae8…` → `a0fb76b13c395374361940521228cf30e8c789a9173c584d0b2f4edb229f1fee`). Every file the game runs, loads or maps is 0.1.14's, byte for byte, `fexdarwin-run` (`c23bb43f…`) and the Wine driver (`8f8610f1…`) among them. They can do two more things, **both off unless one launch asks**: `steam play --free-pointer` (the Mac's pointer is held only while the game confines it, as on Windows, and a read-only channel says what it does) and `steam play --shared-textures` (a texture the game shares, such as a Spout sender's, gets a handle, and its frames can be read by a program of the same user): [What a launch can ask of the engine](#what-a-launch-can-ask-of-the-engine), which also tells where a session's `.host` folder is and names the two sockets' protocols. A launch that asks for neither is 0.1.14's: the same process, arguments, environment, descriptors and signals, and the same of the window server and the render server. [`status`](#status-1) says which options this program takes (`play_options`); a launch that asked hears what it is given ([`host_features`](#host_features)). Ran on 2026-11-25 with VRChat, both options on, with this `wsd` to the byte and the same render servers but for the linker's UUID, put in by a developer build of 0.1.14: three starts, all clean (arrived, no anti-cheat line, an ordinary quit); the game freed the pointer as its Quick Menu opened and took it back as it closed (three times, in the log); two minutes in a private instance of a world with a video player. **Not seen yet:** VRChat's own Spout sender (an owned sender alone), and nobody has used the game's menu by hand with the pointer free. No game was started with this build of the program before its release. voile-lkd `bf0af9b` and `248bf43` stay held back. A runtime with 0.1.14's files (`ours-earlier`) gets this one's at its next start, in a transaction; going back to 0.1.14 needs its `engine repair`.
 
 0.1.14 changes one engine file, `fexdarwin-run` (Orbiters-cc/voile-lkd tag `orbiters-cli-0.1.14`, `73fe820`, SHA-256 `c23bb43f47a4f763f4376761bf1184a86b2f3e88414038ebc814c9c2ad5fd182`); the four others are 0.1.8's to 0.1.13's, byte for byte, and an ordinary start gives the game the same process, arguments, environment, descriptors and signals as 0.1.13 did. On the engine of 0.1.7 to 0.1.13 a thread that was paused and resumed, as the game's garbage collector does to every thread, could run one instruction twice or lose part of its processor state; under heavy loading on many threads this crashed the game (seen on 2026-11-24: one crash 22 s after entering a crowded world, and 2 crashes in 8 starts with empty caches). The engine now pauses a thread only at exact instruction boundaries, and reaches one within microseconds ([The engine](#the-engine)). No scheduling attribute of any guest thread is changed. Ran on 2026-11-25 with VRChat and this very file (in place of 0.1.13's for each start, by a developer build of 0.1.13): 10 cold starts (no crash, no hang), 25 quick starts and quits (no hang), and 5 minutes in a public world with 18 players and 26 avatars loaded from scratch (no crash); no anti-cheat line in any of the 36. An earlier build of the same fix: 13 cold starts, no crash, one hang at quit that was not attributed. Known and unchanged: the rare freeze of the whole process from a late ptrace attach stop is not addressed, and voile-lkd `bf0af9b` and `248bf43` are still held back. A runtime with 0.1.13's files (`ours-earlier`) gets this one's at its next start, in a transaction. No game was started with this build of the program before its release.
 
@@ -143,13 +145,13 @@ It runs the game's Transfer through the app's download queue whatever is install
 
 It needs a signed-in account and `obelisk-steam-host`, and ends with `busy` while a game runs.
 
-### `steam play <app_id> [--steam-id <id>] [--render-percent <1..100>] [--no-saved-arguments] [--no-free-pointer] [--no-shared-textures] [-- <argument>...]`
+### `steam play <app_id> [--steam-id <id>] [--render-percent <1..100>] [--no-saved-arguments] [--free-pointer] [--shared-textures] [-- <argument>...]`
 
 Starts the installed Windows build as the app's Play does and stays attached until its Game session is finished:
 
 1. [`preparing`](#preparing).
 2. [`progress`](#progress), while a Transfer repairs an interrupted installation or installs Steam's newer build, and while a runtime that is missing or outdated downloads. [`voile_update`](#voile_update) when a newer Voile release is taken.
-3. [`starting`](#starting), once the game's supervisor holds it, with its Game session.
+3. [`starting`](#starting), once the game's supervisor holds it, with its Game session; before it [`host_features`](#host_features), only when the launch asked with `--free-pointer` or `--shared-textures`.
 4. [`running`](#running), with the game's process ID.
 5. [`cloud_pending`](#cloud_pending), only when Steam Cloud asks a question after the game exited.
 6. [`exited`](#exited), with the game's exit code.
@@ -160,7 +162,7 @@ Starts the installed Windows build as the app's Play does and stays attached unt
 
 `--no-saved-arguments` (from 0.1.13) starts the game without the arguments kept in its launch settings (the app's Launch Settings arguments): those after `--` are then the only ones of the player's, and none of them means none. For this launch only: what is kept stays kept, and every other launch setting (engine, graphics, render percent, Game Mode, the Performance HUD) applies as ever; so do Steam's own arguments and the game profile's. It is for a program that must know exactly what it starts the game with, such as one that names a VRChat profile: a kept `--profile=1` would reach the game beside, and before, the one it names.
 
-`--no-free-pointer` and `--no-shared-textures` (unreleased) start VRChat without what the engine does [for it alone](#what-the-engine-does-for-vrchat-alone), for this launch only. No option turns either on for another game.
+`--free-pointer` and `--shared-textures` (from 0.1.15) ask two of the engine's programs on the Mac's side for something more, for this launch only: see [What a launch can ask of the engine](#what-a-launch-can-ask-of-the-engine). Without them a game has neither, whatever its profile or its launch settings say, and nothing keeps them. A game whose engine or graphics has none of it (Rosetta's Wine; for `--shared-textures` also D3DMetal) starts without it: the launch is never refused for it, and a [`host_features`](#host_features) event says what it is given. Ask only for what [`status`](#status-1) names in `play_options`: an older program refuses the whole start (`usage`).
 
 All five come before `--`, in any order.
 
@@ -210,6 +212,7 @@ Keeps whether Windows games run in Voile's pre-releases too, as the app's beta r
 | `keychain` | string | `ok`, or `unavailable` when the Keychain could not be read. |
 | `voile` | object | `installed` (string or null): the Voile release Windows games run in now, such as `v26.3.0-16`. `prereleases` (boolean): pre-releases are taken. `keyboard_layout` (string or null): whether this build's engine files are in place for the games of the Linux engine, told by the keyboard they get, see [Keyboard layout](#keyboard-layout) and [Graphics](#graphics): `mac` (all in place: the layout selected on the Mac, Neptune's render servers of this build), `pending` (the release they are for, with Voile's own files or some of ours left by an older build: all of ours from the next launch on the engine), `us` (another release, or a file that is neither Voile's nor ours: none is changed, and its games get a US keyboard whatever the Mac's layout, and whatever render servers are there). Null when no release with the Linux engine is installed. `engine_files` (array or null, from 0.1.6): each engine file of this build, `path` (in the Linux engine) and `state`: `voile` (the release's own), `ours` (this build's), `ours-earlier` (from 0.1.7: a file an earlier build of this program put there, replaced at the next launch on the engine like the release's own), `other` (neither), `unreadable` (from 0.1.8: there but it cannot be read; no game starts until it can): what is in place now, file by file, whatever `keyboard_layout` sums up. Null without a Linux engine. |
 | `helpers` | object | `directory` (string), `found` (boolean: every helper a launch needs is there), `missing` (array of file names), `rosetta_helper` (boolean: `Obelisk Rosetta.app` is beside the folder). |
+| `play_options` | array of strings or absent | From 0.1.15: the options `steam play` takes, as they are written (`--steam-id`, `--render-percent`, `--no-saved-arguments`, `--free-pointer`, `--shared-textures`), so that a program needs no version to know them. Absent in older builds. |
 
 ### `challenge`
 
@@ -297,6 +300,16 @@ Keeps whether Windows games run in Voile's pre-releases too, as the app's beta r
 | `platform` | string | `windows`. |
 | `bytes` | number | The installation's size. |
 | `voile` | string or null | The Voile release Windows games run in now. |
+
+### `host_features`
+
+From 0.1.15, before `starting`, only when the launch asked for [something of the engine](#what-a-launch-can-ask-of-the-engine): what it is given by its engine and its graphics.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `app_id` | number | The game. |
+| `free_pointer` | boolean | `--free-pointer` applies. False when it was not asked for, or the game's engine is not the Linux one. |
+| `shared_textures` | boolean | `--shared-textures` applies. False when it was not asked for, or the game does not run on the Linux engine with DXMT. |
 
 ### `starting`
 
@@ -495,18 +508,23 @@ Tested: the unchanged sources rebuild the release's two render servers byte for 
 
 Tested: the release's own `fexdarwin-run` rebuilt from its sources byte for byte but for the linker's UUID and the ad hoc signature (`scripts/build-engine-patch.sh` refuses to write a patch otherwise); LKD's ptrace and signal tests on ours; a guest shell run through it with a job-control stop and continue; the files of every earlier build (`cli-v0.1.2` to `cli-v0.1.6`) over a copy of the release as Voile ships it are replaced by these (`every_earlier_release_s_files_are_replaced`, run with `OBELISK_PRISTINE_RELEASE`).
 
-## What the engine does for VRChat alone
+## What a launch can ask of the engine
 
-Unreleased. For VRChat (Steam app 438100) on the Linux engine, and for no other game, two of the engine's programs on the Mac's side do something more; the launcher (`launch.sh`) gives them the options, and the game's log names them in its head (`free_pointer=on shared_textures=on`). Nothing the game runs, loads or maps is another for it, and any other game's launch is, argument for argument and variable for variable, what it was. It is no field of the game profiles, which Obelisk reads again from `main`.
+From 0.1.15, two of the engine's programs on the Mac's side do something more for a launch that asks with [`steam play --free-pointer` and `--shared-textures`](#steam-play-app_id---steam-id-id---render-percent-1100---no-saved-arguments---free-pointer---shared-textures----argument), each by itself, on the Linux engine alone. Nothing the game runs, loads or maps is another for it: the two options change what `wsd` and the render server, host programs, do. A launch that asks for neither gives both, argument for argument and variable for variable, what 0.1.14 gave them, and they then run their released code (below, Tested).
 
-| | `--free-pointer on` (`steam play --no-free-pointer` leaves it out) | `--shared-textures on` (`--no-shared-textures`; DXMT only) |
+| | `--free-pointer` | `--shared-textures` (DXMT only) |
 | --- | --- | --- |
 | program | the window server, `wsd --free-unconfined-pointer --pointer-socket <host folder>/pointer.sock` | the render server, `NPT_SHARED_PUBLISH=<host folder>/shared` |
-| what | the Mac's pointer is held only while the game confines it: free while VRChat's menus are open, as on Windows | a texture VRChat shares (its stream camera's, for Spout) gets a share handle, and its frames can be read by a program of the same user |
-| for local programs | the pointer's state, the game window's place, and the raw moves while it is held (voile-lkd's `wsd/PROTOCOL.md`, "Pointer channel"; `wsd/wsd_pointer.h`) | each live shared texture: token, size, format, whole frames in memory mapped read-only (Neptune's `virglrenderer/docs/shared-textures.md`; `npt_publish_wire.h`) |
-| in the log | `wsd: ... pointer held by the game` / `pointer freed by the game` | `npt: publish: ...` |
+| what | the Mac's pointer is held only while the game confines it, as on Windows: free while VRChat's Quick Menu is open | a texture the game shares (VRChat's stream camera's, for Spout) gets a share handle, and its frames can be read by a program of the same user |
+| for local programs | the pointer's state, the game window's place, and the raw moves while it is held: voile-lkd's [`wsd/PROTOCOL.md`](https://github.com/Orbiters-cc/voile-lkd/blob/orbiters-cli-0.1.15/wsd/PROTOCOL.md), "Pointer channel", and [`wsd/wsd_pointer.h`](https://github.com/Orbiters-cc/voile-lkd/blob/orbiters-cli-0.1.15/wsd/wsd_pointer.h) | each live shared texture: token, size, format, whole frames in memory mapped read-only: Neptune's [`virglrenderer/docs/shared-textures.md`](https://github.com/Orbiters-cc/neptune/blob/orbiters-cli-0.1.15/virglrenderer/docs/shared-textures.md) and [`npt_publish_wire.h`](https://github.com/Orbiters-cc/neptune/blob/orbiters-cli-0.1.15/virglrenderer/src/neptune/npt_publish_wire.h) |
+| socket | `<host folder>/pointer.sock` | `<host folder>/shared/<process>.sock`, with the game's first shared texture |
+| in the game's log | in its head `free_pointer=on`; `wsd: ... pointer held by the game` / `pointer freed by the game` | in its head `shared_textures=on`; `npt: publish: ...` |
 
-The **host folder** is `<TMPDIR>/obelisk-engine-<pid>.host`, mode 700, where `<pid>` is the [Game session record](#game-session-records)'s `game.pid` and `<TMPDIR>` the launch's (the user's temporary folder, `getconf DARWIN_USER_TEMP_DIR`). It is beside the session's sockets (`obelisk-engine-<pid>`, which the game sees as `/run/obelisk`) and not in them: the game does not see it, and Force Quit, which ends whatever uses a file of the sockets' folder, never takes a program that reads here for the game's. It goes with the session; a launch that cannot make it starts without either channel. Both channels only tell: a reader that sends anything is disconnected, one that does not read is dropped, and nothing waits for a reader.
+(Both documents were written when VRChat was to have both by itself: where they say the launcher gives them for VRChat alone, it is the launch that asks.)
+
+The **host folder** is `<TMPDIR>/obelisk-engine-<pid>.host`, mode 700, where `<pid>` is the [Game session record](#game-session-records)'s `game.pid` and `<TMPDIR>` the launch's (the user's temporary folder, `getconf DARWIN_USER_TEMP_DIR`). It is there only for a launch that asked. It is beside the session's sockets (`obelisk-engine-<pid>`, which the game sees as `/run/obelisk`) and not in them: the game does not see it, and Force Quit, which ends whatever uses a file of the sockets' folder, never takes a program that reads here for the game's. It goes with the session; a launch that cannot make it starts without either channel. Both channels only tell: a reader that sends anything is disconnected, one that does not read is dropped, and nothing waits for a reader. A program that reads them finds out by connecting, never by the version.
+
+Tested: every file of `v26.3.0-27.beta1` after an upgrade from 0.1.14's runtime is 0.1.14's but the three named at the top (15,514 entries; `fexdarwin-run` and the Wine driver among the unchanged, and everything the guest has). `wsd` rebuilds to the byte the program VRChat ran, the two render servers but for the linker's UUID and the ad hoc signature's hashes. **Without the options**, against 0.1.14's own files: the window server's answer to one sequence of requests and input (an owned client, six sizes) is the released program's, event for event and log line for log line; so are an owned Windows program's lines and the window server's log on the engine, and, of the render server, an owned sender's and a video player's lines and the server's own log; `launch.sh` gives both programs no new argument and no new variable (`what_the_host_programs_do_for_one_launch_reaches_them_alone_and_only_when_asked`, the shell script run on recording programs). **With them**: voile-lkd's `tests/graphics/wsd_pointer.py` and `pointer_game.py` (the Windows program in a window, at three sizes; its full-screen run not complete on 2026-11-25: macOS's own alerts covered the middle of the screen, where it presses, and the test presses only its own windows) and Neptune's `tests/neptune/publish/run.py` (copied and drawn pictures, eight senders one after the other, four readers, a killed worker, 4,000 pictures as fast as the GPU goes: no picture torn, wrong or out of order).
 
 ## Questions answered in the player's place
 
@@ -556,7 +574,7 @@ obelisk-cli-<version>-arm64/
 
 Keep the folder whole: `obelisk-cli` finds the helpers in `SteamNative` beside itself, and the supervisor finds `Obelisk Rosetta.app` beside `SteamNative`.
 
-Every program is signed with the identity `CLI_SIGN_IDENTITY` names, else the first `Developer ID Application` identity of the Keychain, else the first `Apple Development` one:
+Every program is signed with the identity `CLI_SIGN_IDENTITY` names, and no other is looked for (from 0.1.15):
 
 | File | Identifier | Hardened runtime | Entitlements |
 | --- | --- | --- | --- |
@@ -566,9 +584,9 @@ Every program is signed with the identity `CLI_SIGN_IDENTITY` names, else the fi
 | `SteamNative/libobelisk_steam_discovery_adapter.dylib` | `cc.orbiters.obelisk-cli.steam-discovery` | no | none |
 | `Obelisk Rosetta.app` | `cc.orbiters.obelisk-cli.rosetta` | yes | none |
 
-A Developer ID signature takes Apple's secure timestamp; an Apple Development one takes none. When the Keychain does not let `codesign` use the key within a minute, or no identity is there, the script says so on standard error and the archive holds the build unsigned. Keep the same identity across builds: the Keychain item that holds the Steam session belongs to the signature that saved it.
+A Developer ID signature takes Apple's secure timestamp; an Apple Development one takes none. When the Keychain does not let `codesign` use the key within a minute, or no identity is named, the script says so on standard error and the archive holds the build unsigned. Keep the same identity across builds: the Keychain item that holds the Steam session belongs to the signature that saved it.
 
-With `CLI_NOTARY_PROFILE` naming a profile of `xcrun notarytool store-credentials`, and a Developer ID signature, the script sends the programs to Apple's notary before it archives them, and waits 20 minutes for the answer. No ticket can be stapled to bare programs: macOS asks Apple for it at their first check. Without it the archive is not notarized, and a program that downloads it should remove the quarantine attribute from the folder, or run it from a process that set none.
+With `CLI_NOTARY_PROFILE` naming a profile of `xcrun notarytool store-credentials`, and a Developer ID signature, the script sends the programs to Apple's notary before it archives them, once, and waits for no answer (from 0.1.15). No ticket can be stapled to bare programs: macOS asks Apple for it at their first check. Without it the archive is not notarized, and a program that downloads it should remove the quarantine attribute from the folder, or run it from a process that set none.
 
 ```sh
 cargo test -p obelisk-cli

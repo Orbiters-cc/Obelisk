@@ -1812,7 +1812,7 @@ mod tests {
             }
             tried += 1;
         }
-        assert!(tried >= 12, "the cli-v0.1.2 to 0.1.13 tags");
+        assert!(tried >= 13, "the cli-v0.1.2 to 0.1.14 tags");
     }
     /// Fourth verification, finding 2: a crash at any point of a transaction is ended at the next launch from
     /// its record alone, and that launch starts on one complete set.
@@ -2361,7 +2361,7 @@ mod tests {
     fn the_published_generations_are_of_known_files() {
         let manifest: Manifest = serde_json::from_str(MANIFEST).unwrap();
         let releases: Vec<&str> = manifest.generations.iter().flat_map(|g| g.releases.iter().map(String::as_str)).collect();
-        for release in ["0.1.2", "0.1.3", "0.1.4", "0.1.5", "0.1.6", "0.1.7", "0.1.8", "0.1.9", "0.1.10", "0.1.11", "0.1.12", "0.1.13"] {
+        for release in ["0.1.2", "0.1.3", "0.1.4", "0.1.5", "0.1.6", "0.1.7", "0.1.8", "0.1.9", "0.1.10", "0.1.11", "0.1.12", "0.1.13", "0.1.14"] {
             assert!(releases.contains(&release), "{release}");
         }
         let patch = built_in();

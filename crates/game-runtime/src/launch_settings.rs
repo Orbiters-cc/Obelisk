@@ -74,15 +74,16 @@ pub struct Settings {
     /// game's environment instead.
     #[serde(default)]
     pub locale: Option<String>,
-    /// What the Linux engine's host programs do for this game alone; nothing
-    /// in a handoff that predates it.
+    /// What the Linux engine's host programs do for this launch alone;
+    /// nothing in a handoff that predates it.
     #[serde(default)]
     pub host: HostFeatures,
 }
 
 /// What the Linux engine's programs on the Mac's side (the window server and
-/// the render server) do for a game that asks for it, and for no other.
-/// Nothing the game runs, loads or maps is another for it.
+/// the render server) do for a launch that asks for it, and for no other.
+/// Nothing the game runs, loads or maps is another for it. No profile and no
+/// launch setting turns either on: a launch that does not ask has neither.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HostFeatures {
@@ -94,16 +95,16 @@ pub struct HostFeatures {
     pub shared_textures: bool,
 }
 
-/// What `game` asks of the engine's host programs: VRChat frees the pointer
-/// while its menus are open and shares its stream camera's picture. This is
-/// no table field, as `language_argument` is none: the builds that read the
-/// table from `main` refuse an entry with a field they do not know, and that
-/// table's readers would take it away again.
-fn host_features(game: profile::Game<'_>) -> HostFeatures {
-    let vrchat = matches!(game, profile::Game::Steam { app_id: 438100 });
-    HostFeatures {
-        free_pointer: vrchat,
-        shared_textures: vrchat,
+impl HostFeatures {
+    /// Of these, what a game on `engine` with `graphics` can have: the Linux
+    /// engine alone has any, and DXMT alone shares textures (D3DMetal's
+    /// render server publishes none).
+    pub fn offered(self, engine: Engine, graphics: Graphics) -> Self {
+        let linux = engine == Engine::Linux;
+        Self {
+            free_pointer: self.free_pointer && linux,
+            shared_textures: self.shared_textures && linux && graphics == Graphics::Dxmt,
+        }
     }
 }
 
@@ -238,17 +239,16 @@ pub fn ignore_saved_arguments() -> bool {
     IGNORE_SAVED.set(()).is_ok()
 }
 
-/// What the engine's host programs do not do for any game this process
-/// launches, whatever the game asks for (`obelisk-cli steam play
-/// --no-free-pointer`, `--no-shared-textures`): a field that is true is left
-/// out. Nothing can be turned on this way. A later call changes nothing and
-/// returns false.
-pub fn leave_out_host_features(left_out: HostFeatures) -> bool {
-    LEFT_OUT.set(left_out).is_ok()
+/// What the engine's host programs do for every game this process launches,
+/// where its engine and its graphics have it (`obelisk-cli steam play
+/// --free-pointer`, `--shared-textures`), without keeping it. Without this
+/// call they do none of it. A later call changes nothing and returns false.
+pub fn ask_host_features(asked: HostFeatures) -> bool {
+    ASKED.set(asked).is_ok()
 }
 
-/// What `leave_out_host_features` was given.
-static LEFT_OUT: OnceLock<HostFeatures> = OnceLock::new();
+/// What `ask_host_features` was given.
+static ASKED: OnceLock<HostFeatures> = OnceLock::new();
 
 /// Whether `ignore_saved_arguments` was called.
 static IGNORE_SAVED: OnceLock<()> = OnceLock::new();
@@ -577,7 +577,14 @@ impl View {
         locale: Option<&str>,
     ) -> Self {
         let added = ADDED.get().map(Vec::as_slice).unwrap_or_default();
-        Self::with(game, profile, choices, locale, added, IGNORE_SAVED.get().is_none())
+        let mut view =
+            Self::with(game, profile, choices, locale, added, IGNORE_SAVED.get().is_none());
+        view.settings.host = ASKED
+            .get()
+            .copied()
+            .unwrap_or_default()
+            .offered(view.settings.engine, view.settings.graphics);
+        view
     }
 
     /// `new`, with `added` after the player's arguments: they start the game
@@ -600,17 +607,6 @@ impl View {
         }
         settings.arguments.extend(added.iter().cloned());
         settings.locale = locale.map(str::to_owned);
-        if settings.engine == Engine::Linux {
-            let asked = host_features(game);
-            let left_out = LEFT_OUT.get().copied().unwrap_or_default();
-            settings.host = HostFeatures {
-                free_pointer: asked.free_pointer && !left_out.free_pointer,
-                // (DXMT's shared textures: D3DMetal's render server has none.)
-                shared_textures: asked.shared_textures
-                    && !left_out.shared_textures
-                    && settings.graphics == Graphics::Dxmt,
-            };
-        }
         let language =
             locale.and_then(|locale| language_argument(game, &settings.arguments, locale));
         settings.profile_arguments.extend(language);

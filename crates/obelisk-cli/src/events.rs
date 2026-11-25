@@ -25,6 +25,7 @@ pub const NAMES: &[&str] = &[
     "voile_update",
     "cloud_pending",
     "installed",
+    "host_features",
     "starting",
     "running",
     "exited",
@@ -97,6 +98,8 @@ pub enum Event {
         keychain: &'static str,
         voile: Voile,
         helpers: Helpers,
+        /// The options `steam play` takes, as they are written.
+        play_options: &'static [&'static str],
     },
     Challenge {
         qr_url: String,
@@ -156,6 +159,13 @@ pub enum Event {
         platform: &'static str,
         bytes: u64,
         voile: Option<String>,
+    },
+    /// What a launch that asked the engine's host programs for anything is
+    /// given: only where its engine and its graphics have it.
+    HostFeatures {
+        app_id: u32,
+        free_pointer: bool,
+        shared_textures: bool,
     },
     Starting {
         app_id: u32,
@@ -406,6 +416,7 @@ mod tests {
             Event::Version { version: "0" }.line(),
             Event::Done { count: 0 }.line(),
             Event::Preparing { app_id: 1 }.line(),
+            Event::HostFeatures { app_id: 1, free_pointer: true, shared_textures: false }.line(),
             Event::Starting { app_id: 1, session_id: None }.line(),
             Event::Settings { prereleases: true }.line(),
             Event::EngineRepairing {

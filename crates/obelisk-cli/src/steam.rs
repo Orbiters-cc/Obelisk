@@ -462,7 +462,7 @@ impl Steam<'_> {
         arguments: Vec<String>,
         render_percent: Option<u32>,
         saved_arguments: bool,
-        left_out: HostFeatures,
+        host: HostFeatures,
     ) -> Result<(), Failure> {
         let saved = credentials::signed_in(self.store)?;
         if steam_id.is_some_and(|expected| expected != saved.steam_id) {
@@ -529,9 +529,10 @@ impl Steam<'_> {
         if let Some(percent) = render_percent {
             game_runtime::launch_settings::override_render_percent(percent);
         }
-        if left_out != HostFeatures::default() {
-            game_runtime::launch_settings::leave_out_host_features(left_out);
+        if host != HostFeatures::default() {
+            game_runtime::launch_settings::ask_host_features(host);
         }
+        let directory = installed.directory.clone();
         installations.launch(installed.id.clone());
         let admitted = installations.state();
         if admitted.launch_game.as_deref() != Some(&game) && admitted.report.is_none() {
@@ -550,7 +551,13 @@ impl Steam<'_> {
             let mut end = None;
             for step in steps {
                 match step {
-                    PlayStep::Tell(event) => self.tell(event),
+                    PlayStep::Tell(event) => {
+                        // By the profile its launch refreshed first.
+                        if host != HostFeatures::default() && matches!(event, Event::Starting { .. }) {
+                            self.tell(self.host_features(app_id, &directory));
+                        }
+                        self.tell(event);
+                    }
                     PlayStep::TakeVoile { session } => {
                         let _ = sessions.answer_voile_update(session, VoileUpdateAnswer::Update);
                     }
@@ -588,6 +595,15 @@ impl Steam<'_> {
         };
         session.shutdown();
         outcome
+    }
+
+    /// What the launch of `app_id`, installed in `directory`, is given of
+    /// what it asked the engine's host programs for: its own settings.
+    fn host_features(&self, app_id: u32, directory: &str) -> Event {
+        let game = game_runtime::profile::Game::Steam { app_id };
+        let view = game_runtime::launch_settings::of(&self.places.library, game, Path::new(directory), None);
+        let HostFeatures { free_pointer, shared_textures } = view.settings.host;
+        Event::HostFeatures { app_id, free_pointer, shared_textures }
     }
 
     /// `steam running`: the Game session that holds Steam, if any.

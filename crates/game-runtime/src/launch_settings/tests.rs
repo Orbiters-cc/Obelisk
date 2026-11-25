@@ -322,11 +322,10 @@ fn a_render_resolution_the_linux_engine_offers_applies_and_is_kept_but_all_pixel
     assert_eq!(view.choices.render_percent, None);
 }
 
-/// VRChat alone asks the engine's host programs for anything, on the Linux
-/// engine alone, whatever table of profiles is read; a process can leave it
-/// out and turn nothing on.
+/// No game has anything of the engine's host programs unless its launch asks
+/// for it, VRChat as any other.
 #[test]
-fn only_vrchat_asks_the_engine_s_host_programs_for_anything() {
+fn no_game_asks_the_engine_s_host_programs_for_anything_by_itself() {
     let vrchat = profile::Game::Steam { app_id: 438100 };
     let install = Path::new("/library/Games/Steam/steamapps/common/VRChat");
     let linux = Profile {
@@ -334,21 +333,28 @@ fn only_vrchat_asks_the_engine_s_host_programs_for_anything() {
         graphics: Graphics::Dxmt,
         ..Profile::default()
     };
-    let host = |game, profile: &Profile, choices| View::with(game, profile, choices, None, &[], true).settings.host;
-    let both = HostFeatures { free_pointer: true, shared_textures: true };
-    assert_eq!(host(vrchat, &linux, Choices::default()), both);
-    assert_eq!(host(vrchat, &profile::of(vrchat, install), Choices::default()), both, "as its profile runs it");
-    let d3dmetal = Profile { graphics: Graphics::D3DMetal, ..linux.clone() };
-    assert_eq!(host(vrchat, &d3dmetal, Choices::default()), HostFeatures { shared_textures: false, ..both });
-    let rosetta = Choices { engine: Some(Engine::Rosetta), ..Choices::default() };
-    assert_eq!(host(vrchat, &linux, rosetta), HostFeatures::default());
-    for game in [ELDEN_RING, OTHER, MINDSEYE, profile::Game::Steam { app_id: 438101 }, profile::Game::Gog { product_id: "438100" }] {
-        assert_eq!(host(game, &linux, Choices::default()), HostFeatures::default(), "{game:?}");
+    for game in [vrchat, ELDEN_RING, OTHER, MINDSEYE, profile::Game::Gog { product_id: "438100" }] {
+        for profile in [&linux, &profile::of(game, install), &Profile::default()] {
+            let view = View::new(game, profile, Choices::default(), None);
+            assert_eq!(view.settings.host, HostFeatures::default(), "{game:?}");
+        }
     }
     // A handoff of an earlier build has no such field.
-    let mut handoff = serde_json::to_value(View::with(vrchat, &linux, Choices::default(), None, &[], true).settings).unwrap();
+    let mut handoff = serde_json::to_value(View::new(vrchat, &linux, Choices::default(), None).settings).unwrap();
     handoff.as_object_mut().unwrap().remove("host").unwrap();
     assert_eq!(serde_json::from_value::<Settings>(handoff).unwrap().host, HostFeatures::default());
+}
+
+#[test]
+fn what_a_launch_asks_is_given_where_its_engine_and_its_graphics_have_it() {
+    let features = |free_pointer, shared_textures| HostFeatures { free_pointer, shared_textures };
+    for asked in [features(false, false), features(true, false), features(false, true), features(true, true)] {
+        assert_eq!(asked.offered(Engine::Linux, Graphics::Dxmt), asked);
+        assert_eq!(asked.offered(Engine::Linux, Graphics::D3DMetal), features(asked.free_pointer, false));
+        for graphics in [Graphics::Dxmt, Graphics::D3DMetal] {
+            assert_eq!(asked.offered(Engine::Rosetta, graphics), HostFeatures::default());
+        }
+    }
 }
 
 #[test]
